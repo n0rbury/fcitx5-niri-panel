@@ -16,8 +16,12 @@ use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
-use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_surface::WlSurface};
+use smithay_client_toolkit::reexports::client::protocol::{
+    wl_output, wl_pointer::WlPointer, wl_seat::WlSeat, wl_surface::WlSurface,
+};
 use smithay_client_toolkit::reexports::client::{backend::WaylandError, Connection, QueueHandle};
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
+use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure,
@@ -39,18 +43,22 @@ const TEXT_COLOR: TextColor = cosmic_text::Color(0xFF_F0_F0_F0);
 struct Row {
     text: String,
     selected: bool,
+    /// Visual index to report to fcitx on click (includes the aux-down row),
+    /// set only for candidate rows.
+    candidate: Option<usize>,
 }
 
 fn build_rows(state: &PanelState) -> Vec<Row> {
     let mut rows = Vec::new();
     if state.preedit_visible && !state.preedit.is_empty() {
-        rows.push(Row { text: state.preedit.clone(), selected: false });
+        rows.push(Row { text: state.preedit.clone(), selected: false, candidate: None });
     } else if state.aux_visible && !state.aux.is_empty() {
-        rows.push(Row { text: state.aux.clone(), selected: false });
+        rows.push(Row { text: state.aux.clone(), selected: false, candidate: None });
     }
     if !state.aux_down.is_empty() {
-        rows.push(Row { text: state.aux_down.clone(), selected: false });
+        rows.push(Row { text: state.aux_down.clone(), selected: false, candidate: None });
     }
+    let aux_row = !state.aux_down.is_empty();
     if !state.candidates.is_empty() {
         match state.layout {
             CandidateLayout::Horizontal => {
@@ -62,13 +70,14 @@ fn build_rows(state: &PanelState) -> Vec<Row> {
                     text.push_str(&c.label);
                     text.push_str(&c.text);
                 }
-                rows.push(Row { text, selected: false });
+                rows.push(Row { text, selected: false, candidate: None });
             }
             _ => {
                 for (i, c) in state.candidates.iter().enumerate() {
                     rows.push(Row {
                         text: format!("{}{}", c.label, c.text),
                         selected: i == state.selected as usize,
+                        candidate: Some(i + usize::from(aux_row)),
                     });
                 }
             }
@@ -80,6 +89,9 @@ fn build_rows(state: &PanelState) -> Vec<Row> {
 struct Panel {
     registry_state: RegistryState,
     output_state: OutputState,
+    seat_state: SeatState,
+    dbus: zbus::Connection,
+    rt: tokio::runtime::Runtime,
     shm: Shm,
     layer: Option<LayerSurface>,
     pool: Option<SlotPool>,
@@ -290,6 +302,76 @@ impl OutputHandler for Panel {
     }
 }
 
+impl SeatHandler for Panel {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            self.seat_state.get_pointer(qh, &seat).expect("create pointer");
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: WlSeat,
+        _capability: Capability,
+    ) {
+    }
+
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat) {}
+}
+
+impl PointerHandler for Panel {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &WlPointer,
+        events: &[PointerEvent],
+    ) {
+        let Some(layer) = self.layer.clone() else { return };
+        for event in events {
+            if &event.surface != layer.wl_surface() {
+                continue;
+            }
+            if let PointerEventKind::Press { button, .. } = event.kind {
+                if button != 272 {
+                    continue;
+                }
+                let rows = build_rows(&self.store.snapshot());
+                if rows.is_empty() {
+                    continue;
+                }
+                let y = event.position.1.max(0.0) as u32;
+                let row = (y.saturating_sub(PADDING)) / LINE_HEIGHT;
+                if let Some(candidate) = rows.get(row as usize).and_then(|row| row.candidate) {
+                    if self.verbose {
+                        eprintln!("[render] click selects candidate {candidate}");
+                    }
+                    let dbus = self.dbus.clone();
+                    let _ = self.rt.block_on(crate::kimpanel::emit_to_fcitx(
+                        &dbus,
+                        "SelectCandidate",
+                        &(candidate as i32,),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 impl CompositorHandler for Panel {
     fn scale_factor_changed(
         &mut self,
@@ -349,7 +431,7 @@ impl LayerShellHandler for Panel {
     fn configure(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         _layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
@@ -364,25 +446,33 @@ smithay_client_toolkit::delegate_compositor!(Panel);
 smithay_client_toolkit::delegate_output!(Panel);
 smithay_client_toolkit::delegate_shm!(Panel);
 smithay_client_toolkit::delegate_layer!(Panel);
+smithay_client_toolkit::delegate_seat!(Panel);
+smithay_client_toolkit::delegate_pointer!(Panel);
 
-pub fn spawn(store: StateStore, verbose: bool, rx: Receiver<()>) {
+pub fn spawn(store: StateStore, verbose: bool, rx: Receiver<()>, dbus: zbus::Connection) {
     std::thread::Builder::new()
         .name("renderer".into())
         .spawn(move || {
-            if let Err(e) = run_renderer(&store, verbose, rx) {
+            if let Err(e) = run_renderer(&store, verbose, rx, dbus) {
                 eprintln!("[render] disabled: {e}");
             }
         })
         .expect("spawn renderer thread");
 }
 
-fn run_renderer(store: &StateStore, verbose: bool, rx: Receiver<()>) -> anyhow::Result<()> {
+fn run_renderer(
+    store: &StateStore,
+    verbose: bool,
+    rx: Receiver<()>,
+    dbus: zbus::Connection,
+) -> anyhow::Result<()> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<Panel>(&conn)?;
     let qh = queue.handle();
 
     let registry_state = RegistryState::new(&globals);
     let output_state = OutputState::new(&globals, &qh);
+    let seat_state = SeatState::new(&globals, &qh);
     let compositor = CompositorState::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
     let layer_shell = LayerShell::bind(&globals, &qh)?;
@@ -404,6 +494,12 @@ fn run_renderer(store: &StateStore, verbose: bool, rx: Receiver<()>) -> anyhow::
     let mut panel = Panel {
         registry_state,
         output_state,
+        seat_state,
+        dbus,
+        rt: tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create renderer runtime"),
         shm,
         layer: Some(layer),
         pool: None,

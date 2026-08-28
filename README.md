@@ -10,6 +10,8 @@ Fcitx 5's Kimpanel UI addon sends panel updates (preedit, aux, candidates,
 cursor rect) which are both logged and painted: candidates appear in a dark
 bar at the bottom of the screen while composing, with the selected row
 highlighted, and the bar hides again when input is committed or focus leaves.
+Clicking a candidate row selects it: the panel emits the Kimpanel
+`SelectCandidate` signal, which Fcitx answers by committing the candidate.
 
 The long-term design is:
 

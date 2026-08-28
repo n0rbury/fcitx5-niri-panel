@@ -1,5 +1,6 @@
 use crate::model::{PanelState, Rect};
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use zbus::{connection::Builder, interface, Connection};
@@ -8,6 +9,17 @@ pub const SERVICE_NAME: &str = "org.kde.impanel";
 pub const OBJECT_PATH: &str = "/org/kde/impanel";
 pub const V1_INTERFACE: &str = "org.kde.impanel";
 pub const V2_INTERFACE: &str = "org.kde.impanel2";
+
+/// Emit an org.kde.impanel signal from this panel's connection (the sender
+/// match that the fcitx5 kimpanel addon subscribes to). This is how panels
+/// order candidate selection, paging, or property triggers.
+pub async fn emit_to_fcitx<B: Serialize + zbus::zvariant::Type>(
+    conn: &Connection,
+    member: &str,
+    body: &B,
+) -> zbus::Result<()> {
+    conn.emit_signal(None::<&str>, OBJECT_PATH, V1_INTERFACE, member, body).await
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelCommand {
@@ -214,41 +226,51 @@ pub async fn subscribe_input_method_signals(store: StateStore) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Default)]
-struct ImpanelV1;
+#[derive(Clone)]
+struct ImpanelV1 {
+    conn: Connection,
+}
 
 #[interface(name = "org.kde.impanel")]
 impl ImpanelV1 {
     async fn configure(&self) {
         println!("Configure");
+        let _ = emit_to_fcitx(&self.conn, "Configure", &()).await;
     }
 
     async fn exit(&self) {
         println!("Exit");
+        let _ = emit_to_fcitx(&self.conn, "Exit", &()).await;
     }
 
     async fn lookup_table_page_down(&self) {
         println!("LookupTablePageDown");
+        let _ = emit_to_fcitx(&self.conn, "LookupTablePageDown", &()).await;
     }
 
     async fn lookup_table_page_up(&self) {
         println!("LookupTablePageUp");
+        let _ = emit_to_fcitx(&self.conn, "LookupTablePageUp", &()).await;
     }
 
     async fn reload_config(&self) {
         println!("ReloadConfig");
+        let _ = emit_to_fcitx(&self.conn, "ReloadConfig", &()).await;
     }
 
     async fn restart(&self) {
         println!("Restart");
+        let _ = emit_to_fcitx(&self.conn, "Restart", &()).await;
     }
 
     async fn select_candidate(&self, index: i32) {
         println!("SelectCandidate index={index}");
+        let _ = emit_to_fcitx(&self.conn, "SelectCandidate", &(index,)).await;
     }
 
     async fn trigger_property(&self, property: &str) {
         println!("TriggerProperty property={property:?}");
+        let _ = emit_to_fcitx(&self.conn, "TriggerProperty", &(property,)).await;
     }
 
     #[zbus(signal)]
@@ -319,24 +341,33 @@ pub async fn run_panel(store: StateStore, verbose: bool, render: bool) -> Result
         }
     });
 
-    if render {
-        crate::render::spawn(store.clone(), verbose, notify_rx);
-    }
-
     let connection: Connection = Builder::session()
         .context("create session D-Bus connection builder")?
         .name(SERVICE_NAME)
         .context("request org.kde.impanel on the session bus")?
-        .serve_at(OBJECT_PATH, ImpanelV1)?
-        .serve_at(
+        .build()
+        .await
+        .context("build Kimpanel D-Bus connection")?;
+
+    connection
+        .object_server()
+        .at(OBJECT_PATH, ImpanelV1 { conn: connection.clone() })
+        .await
+        .context("serve org.kde.impanel")?;
+    connection
+        .object_server()
+        .at(
             OBJECT_PATH,
             ImpanelV2 {
                 store: store.clone(),
             },
-        )?
-        .build()
+        )
         .await
-        .context("build Kimpanel D-Bus connection")?;
+        .context("serve org.kde.impanel2")?;
+
+    if render {
+        crate::render::spawn(store.clone(), verbose, notify_rx, connection.clone());
+    }
 
     let ctxt_v1 = zbus::object_server::SignalContext::new(&connection, OBJECT_PATH)?;
     let ctxt_v2 = zbus::object_server::SignalContext::new(&connection, OBJECT_PATH)?;

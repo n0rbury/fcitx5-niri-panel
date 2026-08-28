@@ -31,8 +31,15 @@ selected row highlighted; the panel now also subscribes to the
 org.kde.kimpanel.inputmethod signals. Niri layer surfaces cannot follow the
 caret, so the bar is screen-edge anchored by design.
 
-Next logical steps: visual validation on Feishu/GTK apps, candidate selection
-by mouse click (org.kde.impanel SelectCandidate), and stash/paging buttons.
+Interaction milestone (2026-08-28, later): candidate selection works
+end-to-end - clicking a row (or calling org.kde.impanel SelectCandidate)
+emits the matching signal from the panel connection and Fcitx commits the
+candidate (verified live: SelectCandidate(0) during a held "nihao"
+composition made the table clear and the bar hide, i.e. a commit happened).
+Paging/property signals are wired the same way.
+
+Next logical steps: visual validation on Feishu/GTK apps, paging buttons on
+the bar (has_previous/has_next already tracked), and stash/paging buttons.
 
 ## Context
 

@@ -45,6 +45,13 @@ async fn main() -> zbus::Result<()> {
         .find_map(|a| a.strip_prefix("--text="))
         .unwrap_or("nihao")
         .to_string();
+    // Seconds to keep composing before focus-out, leaving room for
+    // external interaction (e.g. SelectCandidate calls) to be observed.
+    let hold: u64 = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--hold="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
 
     let conn = zbus::Connection::session().await?;
     let im = InputMethod1Proxy::new(&conn).await?;
@@ -73,7 +80,7 @@ async fn main() -> zbus::Result<()> {
         std::thread::sleep(Duration::from_millis(80));
     }
 
-    std::thread::sleep(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_secs(hold));
     ic.focus_out().await?;
     ic.destroy_ic().await?;
     println!("done");
