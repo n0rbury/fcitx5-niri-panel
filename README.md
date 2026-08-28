@@ -44,6 +44,21 @@ Chromium-class apps) keep the client-side UI path and do not reach the panel.
 SSH). `cargo run --bin icdriver -- --text=nihao` drives a synthetic input
 context for repeatable verification.
 
+## Autostart
+
+```bash
+cargo build --release
+./scripts/install-autostart.sh
+```
+
+installs the release binary to `~/.local/bin` and registers a systemd user
+service (`fcitx5-niri-panel.service`) that starts the panel at login and
+restarts it on failure. Logs land in the user journal:
+
+```bash
+journalctl --user -u fcitx5-niri-panel -f
+```
+
 ## Build and run
 
 ```bash

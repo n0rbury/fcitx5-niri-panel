@@ -1,0 +1,11 @@
+[Unit]
+Description=Fcitx5 Niri candidate/preedit panel
+After=default.target
+
+[Service]
+ExecStart=%h/.local/bin/fcitx5-niri-panel
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
