@@ -36,6 +36,9 @@ use crate::pager::{draw_glyph, pager_hit};
 
 const LINE_HEIGHT: u32 = 22;
 const PADDING: u32 = 6;
+/// Extra margin so the last glyph row is never clipped: cosmic-text lays out
+/// the first line with a ~line-height/2 top offset.
+const BOTTOM_MARGIN: u32 = 8;
 const PAGER_W: u32 = 48;
 
 const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xe8]; // RGBA
@@ -89,6 +92,122 @@ fn build_rows(state: &PanelState) -> Vec<Row> {
     rows
 }
 
+/// Paint the bar into a BGRA pixel buffer (wl_shm ARGB8888 order). Returns
+/// None when there is nothing to show for the given state.
+pub fn render_bar_pixels(
+    state: &PanelState,
+    w: u32,
+    height: u32,
+    font_system: &mut FontSystem,
+    swash: &mut SwashCache,
+) -> Option<Vec<u8>> {
+    let rows = build_rows(state);
+    if rows.is_empty() {
+        return None;
+    }
+
+    let mut px = vec![0u8; w as usize * height as usize * 4];
+    for chunk in px.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&BG_COLOR);
+    }
+    let bgra = |r: u8, g: u8, b: u8, a: u8| [b, g, r, a];
+
+    let mut text_buffer =
+        TextBuffer::new(font_system, Metrics::new(15.0, LINE_HEIGHT as f32));
+    text_buffer.set_size(font_system, Some(w as f32), Some(height as f32));
+    let text = rows
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    text_buffer.set_text(
+        font_system,
+        &text,
+        Attrs::new().color(TEXT_COLOR),
+        Shaping::Advanced,
+    );
+
+    if let Some(sel) = rows.iter().position(|row| row.selected) {
+        if let Some(run) = text_buffer.layout_runs().nth(sel) {
+            let y = run.line_y.round() as i32;
+            let row_h = run.line_height.round() as i32;
+            for yy in y..(y + row_h) {
+                if yy < 0 || yy as u32 >= height {
+                    continue;
+                }
+                for pixel in px
+                    [(yy as usize) * w as usize * 4..(yy as usize + 1) * w as usize * 4]
+                    .chunks_exact_mut(4)
+                {
+                    pixel.copy_from_slice(&bgra(
+                        SEL_BG_COLOR[0], SEL_BG_COLOR[1], SEL_BG_COLOR[2], SEL_BG_COLOR[3],
+                    ));
+                }
+            }
+        }
+    }
+
+    text_buffer.draw(font_system, swash, TEXT_COLOR, |x, y, gw, gh, color| {
+        let c = color.0;
+        let a = ((c >> 24) & 0xff) as u8;
+        let r = ((c >> 16) & 0xff) as u8;
+        let g = ((c >> 8) & 0xff) as u8;
+        let b = (c & 0xff) as u8;
+        for yy in y..(y + gh as i32) {
+            if yy < 0 || yy as u32 >= height {
+                continue;
+            }
+            for xx in x..(x + gw as i32) {
+                if xx < 0 || xx as u32 >= w {
+                    continue;
+                }
+                let idx = ((yy as u32) * w + xx as u32) as usize * 4;
+                let dst_a = px[idx + 3];
+                let out_a = a as u16 + (dst_a as u16 * (255 - a as u16)) / 255;
+                for (c, off) in [(r, 2usize), (g, 1), (b, 0)] {
+                    px[idx + off] =
+                        (c as u16 + (px[idx + off] as u16 * (255 - a as u16)) / 255)
+                            .min(255) as u8;
+                }
+                px[idx + 3] = out_a.min(255) as u8;
+            }
+        }
+    });
+
+    if state.has_previous || state.has_next {
+        let center_y = (height as i32 - LINE_HEIGHT as i32) / 2;
+        let right = w as i32;
+        if state.has_previous {
+            draw_glyph(
+                &mut px,
+                w,
+                height,
+                font_system,
+                swash,
+                '\u{2039}',
+                right - 2 * PAGER_W as i32 + 20,
+                center_y,
+                PAGER_ACTIVE,
+            );
+        }
+        if state.has_next {
+            draw_glyph(
+                &mut px,
+                w,
+                height,
+                font_system,
+                swash,
+                '\u{203a}',
+                right - PAGER_W as i32 + 20,
+                center_y,
+                PAGER_ACTIVE,
+            );
+        }
+    }
+
+    Some(px)
+}
+
 struct Panel {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -114,7 +233,7 @@ impl Panel {
         let rows = build_rows(&state);
         let visible = state.visible && !rows.is_empty();
         let desired_height = if visible {
-            rows.len() as u32 * LINE_HEIGHT + 2 * PADDING
+            rows.len() as u32 * LINE_HEIGHT + 2 * PADDING + BOTTOM_MARGIN
         } else {
             0
         };
@@ -153,117 +272,15 @@ impl Panel {
         }
         let height = self.desired_height.min(h);
         let state = self.store.snapshot();
-        let rows = build_rows(&state);
-        if rows.is_empty() {
-            return;
-        }
-
-        // BGRA pixel buffer (wl_shm ARGB8888 is little-endian BGRA).
-        let mut px = vec![0u8; w as usize * height as usize * 4];
-        for chunk in px.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&BG_COLOR);
-        }
-        let bgra = |r: u8, g: u8, b: u8, a: u8| [b, g, r, a];
-
-        let mut text_buffer =
-            TextBuffer::new(&mut self.font_system, Metrics::new(15.0, LINE_HEIGHT as f32));
-        text_buffer.set_size(&mut self.font_system, Some(w as f32), Some(height as f32));
-        let text = rows
-            .iter()
-            .map(|row| row.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        text_buffer.set_text(
-            &mut self.font_system,
-            &text,
-            Attrs::new().color(TEXT_COLOR),
-            Shaping::Advanced,
-        );
-
-        if let Some(sel) = rows.iter().position(|row| row.selected) {
-            if let Some(run) = text_buffer.layout_runs().nth(sel) {
-                let y = run.line_y.round() as i32;
-                let row_h = run.line_height.round() as i32;
-                for yy in y..(y + row_h) {
-                    if yy < 0 || yy as u32 >= height {
-                        continue;
-                    }
-                    for pixel in px
-                        [(yy as usize) * w as usize * 4..(yy as usize + 1) * w as usize * 4]
-                        .chunks_exact_mut(4)
-                    {
-                        pixel.copy_from_slice(&bgra(
-                            SEL_BG_COLOR[0], SEL_BG_COLOR[1], SEL_BG_COLOR[2], SEL_BG_COLOR[3],
-                        ));
-                    }
-                }
-            }
-        }
-
-        text_buffer.draw(
+        let Some(px) = render_bar_pixels(
+            &state,
+            w,
+            height,
             &mut self.font_system,
             &mut self.swash,
-            TEXT_COLOR,
-            |x, y, gw, gh, color| {
-                let c = color.0;
-                let a = ((c >> 24) & 0xff) as u8;
-                let r = ((c >> 16) & 0xff) as u8;
-                let g = ((c >> 8) & 0xff) as u8;
-                let b = (c & 0xff) as u8;
-                for yy in y..(y + gh as i32) {
-                    if yy < 0 || yy as u32 >= height {
-                        continue;
-                    }
-                    for xx in x..(x + gw as i32) {
-                        if xx < 0 || xx as u32 >= w {
-                            continue;
-                        }
-                        let idx = ((yy as u32) * w + xx as u32) as usize * 4;
-                        let dst_a = px[idx + 3];
-                        let out_a = a as u16 + (dst_a as u16 * (255 - a as u16)) / 255;
-                        for (c, off) in [(r, 2usize), (g, 1), (b, 0)] {
-                            px[idx + off] =
-                                (c as u16 + (px[idx + off] as u16 * (255 - a as u16)) / 255)
-                                    .min(255) as u8;
-                        }
-                        px[idx + 3] = out_a.min(255) as u8;
-                    }
-                }
-            },
-        );
-
-        // Right-edge paging indicators.
-        if state.has_previous || state.has_next {
-            let center_y = (height as i32 - LINE_HEIGHT as i32) / 2;
-            let right = w as i32;
-            if state.has_previous {
-                draw_glyph(
-                    &mut px,
-                    w,
-                    height,
-                    &mut self.font_system,
-                    &mut self.swash,
-                    '\u{2039}',
-                    right - 2 * PAGER_W as i32 + 20,
-                    center_y,
-                    PAGER_ACTIVE,
-                );
-            }
-            if state.has_next {
-                draw_glyph(
-                    &mut px,
-                    w,
-                    height,
-                    &mut self.font_system,
-                    &mut self.swash,
-                    '\u{203a}',
-                    right - PAGER_W as i32 + 20,
-                    center_y,
-                    PAGER_ACTIVE,
-                );
-            }
-        }
-
+        ) else {
+            return;
+        };
         let pool = match self.pool.as_mut() {
             Some(pool) => pool,
             None => {
@@ -287,7 +304,7 @@ impl Panel {
                 buffer.attach_to(layer.wl_surface()).expect("attach buffer");
                 layer.commit();
                 if self.verbose {
-                    eprintln!("[render] bar w={w} h={height} rows={}", rows.len());
+                    eprintln!("[render] bar w={w} h={height}");
                 }
             }
             Err(e) => {
