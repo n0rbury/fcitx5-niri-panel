@@ -1,5 +1,6 @@
 use crate::model::{PanelState, Rect};
 use anyhow::{Context, Result};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use zbus::{connection::Builder, interface, Connection};
 
@@ -20,14 +21,74 @@ pub enum PanelCommand {
     Configure,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct StateStore {
     inner: Arc<RwLock<PanelState>>,
+    notify: Option<Sender<()>>,
 }
 
 impl StateStore {
+    pub fn new(notify: Option<Sender<()>>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(PanelState::default())),
+            notify,
+        }
+    }
+
+    fn mutate<F: FnOnce(&mut PanelState)>(&self, f: F) {
+        f(&mut self.inner.write().expect("state lock poisoned"));
+        if let Some(tx) = &self.notify {
+            let _ = tx.send(());
+        }
+    }
+
     pub fn snapshot(&self) -> PanelState {
         self.inner.read().expect("state lock poisoned").clone()
+    }
+
+    pub fn set_preedit(&self, text: &str) {
+        self.mutate(|s| {
+            s.preedit = text.to_string();
+            s.recompute_visible();
+        });
+    }
+
+    pub fn set_preedit_visible(&self, visible: bool) {
+        self.mutate(|s| {
+            s.preedit_visible = visible;
+            s.recompute_visible();
+        });
+    }
+
+    pub fn set_preedit_cursor(&self, cursor: i32) {
+        self.mutate(|s| s.preedit_cursor = cursor);
+    }
+
+    pub fn set_aux(&self, text: &str) {
+        self.mutate(|s| {
+            s.aux = text.to_string();
+            s.recompute_visible();
+        });
+    }
+
+    pub fn set_aux_visible(&self, visible: bool) {
+        self.mutate(|s| {
+            s.aux_visible = visible;
+            s.recompute_visible();
+        });
+    }
+
+    pub fn set_lookup_visible(&self, visible: bool) {
+        self.mutate(|s| {
+            if !visible {
+                s.candidates.clear();
+            }
+            s.recompute_visible();
+        });
+    }
+
+    pub fn set_lookup_cursor(&self, index: i32) {
+        self.mutate(|s| s.selected = index);
     }
 
     fn set_lookup_table(
@@ -40,7 +101,7 @@ impl StateStore {
         selected: i32,
         layout: i32,
     ) -> zbus::fdo::Result<()> {
-        let mut state = self.snapshot();
+        let mut state = self.inner.read().expect("state lock poisoned").clone();
         state
             .set_lookup_table(
                 labels,
@@ -52,8 +113,9 @@ impl StateStore {
                 layout,
             )
             .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
-        *self.inner.write().expect("state lock poisoned") = state.clone();
 
+        self.mutate(move |s| *s = state);
+        let state = self.snapshot();
         println!(
             "SetLookupTable aux_down={:?} candidates={:?} labels={:?} attrs={:?} prev={} next={} selected={} layout={}",
             state.aux_down,
@@ -69,9 +131,10 @@ impl StateStore {
     }
 
     fn set_spot(&self, rect: Rect, scale: Option<f64>) {
-        let mut state = self.inner.write().expect("state lock poisoned");
-        state.spot = Some(rect);
-        state.scale = scale;
+        self.mutate(move |s| {
+            s.spot = Some(rect);
+            s.scale = scale;
+        });
         match scale {
             Some(scale) => println!(
                 "SetRelativeSpotRectV2 x={} y={} width={} height={} scale={}",
@@ -83,6 +146,72 @@ impl StateStore {
             ),
         }
     }
+}
+
+/// Subscribe to the fcitx5 kimpanel addon state signals (/kimpanel,
+/// org.kde.kimpanel.inputmethod) and feed them into the shared store.
+///
+/// Uses a dedicated connection so the match-rule stream never interferes with
+/// the org.kde.impanel object server on the main connection.
+pub async fn subscribe_input_method_signals(store: StateStore) -> Result<()> {
+    use futures_util::StreamExt;
+    use zbus::message::Type;
+    use zbus::MatchRule;
+
+    let conn = Connection::session().await?;
+    let rule = MatchRule::builder()
+        .msg_type(Type::Signal)
+        .path("/kimpanel")?
+        .interface("org.kde.kimpanel.inputmethod")?
+        .build();
+    let mut stream = zbus::MessageStream::for_match_rule(rule, &conn, Some(64)).await?;
+
+    while let Some(msg) = stream.next().await {
+        let Ok(msg) = msg else { continue };
+        let header = msg.header();
+        let Some(member) = header.member().map(|m| m.as_str()) else {
+            continue;
+        };
+        match member {
+            "UpdatePreeditText" => {
+                if let Ok((text, _)) = msg.body().deserialize::<(String, String)>() {
+                    store.set_preedit(&text);
+                }
+            }
+            "ShowPreedit" => {
+                if let Ok((visible,)) = msg.body().deserialize::<(bool,)>() {
+                    store.set_preedit_visible(visible);
+                }
+            }
+            "UpdatePreeditCaret" => {
+                if let Ok((cursor,)) = msg.body().deserialize::<(i32,)>() {
+                    store.set_preedit_cursor(cursor);
+                }
+            }
+            "UpdateAux" => {
+                if let Ok((text, _)) = msg.body().deserialize::<(String, String)>() {
+                    store.set_aux(&text);
+                }
+            }
+            "ShowAux" => {
+                if let Ok((visible,)) = msg.body().deserialize::<(bool,)>() {
+                    store.set_aux_visible(visible);
+                }
+            }
+            "ShowLookupTable" => {
+                if let Ok((visible,)) = msg.body().deserialize::<(bool,)>() {
+                    store.set_lookup_visible(visible);
+                }
+            }
+            "UpdateLookupTableCursor" => {
+                if let Ok((index,)) = msg.body().deserialize::<(i32,)>() {
+                    store.set_lookup_cursor(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Default)]
@@ -178,7 +307,22 @@ impl ImpanelV2 {
     async fn panel_created2(ctxt: &zbus::object_server::SignalContext<'_>) -> zbus::Result<()>;
 }
 
-pub async fn run_panel(store: StateStore, verbose: bool) -> Result<()> {
+pub async fn run_panel(store: StateStore, verbose: bool, render: bool) -> Result<()> {
+    let mut store = store;
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<()>();
+    store.notify = Some(notify_tx);
+
+    let signal_store = store.clone();
+    tokio::spawn(async move {
+        if let Err(e) = subscribe_input_method_signals(signal_store).await {
+            eprintln!("kimpanel signal subscription failed: {e}");
+        }
+    });
+
+    if render {
+        crate::render::spawn(store.clone(), verbose, notify_rx);
+    }
+
     let connection: Connection = Builder::session()
         .context("create session D-Bus connection builder")?
         .name(SERVICE_NAME)

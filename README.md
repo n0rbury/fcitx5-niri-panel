@@ -4,9 +4,12 @@ A standalone Fcitx 5 Kimpanel-compatible candidate/preedit panel for Niri.
 
 ## Current stage
 
-The prototype implements the **panel side** of the KDE Kimpanel D-Bus
-protocol. Fcitx 5's Kimpanel UI addon is the client and sends panel updates to
-this process.
+The panel implements the **panel side** of the KDE Kimpanel D-Bus protocol and
+renders the input state as a bottom-anchored wlr-layer-shell bar on Niri.
+Fcitx 5's Kimpanel UI addon sends panel updates (preedit, aux, candidates,
+cursor rect) which are both logged and painted: candidates appear in a dark
+bar at the bottom of the screen while composing, with the selected row
+highlighted, and the bar hides again when input is committed or focus leaves.
 
 The long-term design is:
 
@@ -26,8 +29,15 @@ fcitx5-niri-panel
         Niri
 ```
 
-The first milestone is deliberately headless: prove that Fcitx discovers the
-standalone panel and delivers real candidate-table and cursor-position data.
+The protocol is verified end-to-end: for input contexts without the
+`ClientSideInputPanel` capability (X11/XWayland apps such as Feishu, GTK/Qt
+apps, synthetic D-Bus contexts), Fcitx routes candidate tables to this panel
+via `SetLookupTable`. Wayland-native portal clients (e.g. Ghostty,
+Chromium-class apps) keep the client-side UI path and do not reach the panel.
+
+`cargo run -- --headless` runs the panel without the Wayland bar (e.g. over
+SSH). `cargo run --bin icdriver -- --text=nihao` drives a synthetic input
+context for repeatable verification.
 
 ## Build and run
 

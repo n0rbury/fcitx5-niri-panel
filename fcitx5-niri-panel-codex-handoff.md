@@ -25,9 +25,14 @@ The open routing question is answered and empirically verified on this machine
 - Panel ABI fixed: SetLookupTable is three string arrays (labels, texts,
   attrs), verified against kimpanel.cpp; docs/dbus-adapter.md corrected.
 
-Next logical step (not started): the Wayland renderer, with the panel extended
-to also subscribe to org.kde.kimpanel.inputmethod signals (preedit, aux,
-properties) that currently go unlogged.
+Renderer milestone (2026-08-28, later): a bottom-anchored wlr-layer-shell bar
+(smithay-client-toolkit + cosmic-text) paints preedit/aux/candidates with the
+selected row highlighted; the panel now also subscribes to the
+org.kde.kimpanel.inputmethod signals. Niri layer surfaces cannot follow the
+caret, so the bar is screen-edge anchored by design.
+
+Next logical steps: visual validation on Feishu/GTK apps, candidate selection
+by mouse click (org.kde.impanel SelectCandidate), and stash/paging buttons.
 
 ## Context
 
