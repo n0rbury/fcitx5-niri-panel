@@ -16,5 +16,6 @@ install -Dm644 "$repo_root/scripts/fcitx5-niri-panel.service" "$HOME/.config/sys
 
 systemctl --user daemon-reload
 systemctl --user enable --now fcitx5-niri-panel.service
+systemctl --user restart fcitx5-niri-panel.service || true
 
 echo "installed and started fcitx5-niri-panel (systemctl --user status fcitx5-niri-panel)"

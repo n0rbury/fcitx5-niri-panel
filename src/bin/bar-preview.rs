@@ -6,7 +6,7 @@ use std::io::Write;
 
 use cosmic_text::{FontSystem, SwashCache};
 use fcitx5_niri_panel::model::{Candidate, CandidateLayout, PanelState};
-use fcitx5_niri_panel::render::render_bar_pixels;
+use fcitx5_niri_panel::render::{estimate_bar_width, render_bar_pixels};
 
 fn state_vertical() -> PanelState {
     let mut s = PanelState::default();
@@ -89,7 +89,7 @@ fn main() {
         ("aux_down", state_aux_down()),
         ("horizontal", state_horizontal()),
     ] {
-        let w = 1200u32;
+        let w = estimate_bar_width(&state, &mut fs).max(1);
         let rows_hint = if name == "vertical" { 7 } else { 7 };
         let h = rows_hint * 22 + 20;
         let px = render_bar_pixels(&state, w, h, &mut fs, &mut swash).expect("render");

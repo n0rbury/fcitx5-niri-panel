@@ -41,7 +41,7 @@ const PADDING: u32 = 6;
 const BOTTOM_MARGIN: u32 = 8;
 const PAGER_W: u32 = 48;
 
-const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xe8]; // RGBA
+const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff]; // RGBA
 const SEL_BG_COLOR: [u8; 4] = [0x2f, 0x5f, 0x8f, 0xff];
 const TEXT_COLOR: TextColor = cosmic_text::Color(0xFF_F0_F0_F0);
 const PAGER_ACTIVE: TextColor = cosmic_text::Color(0xFF_B9_C8_DD);
@@ -90,6 +90,32 @@ fn build_rows(state: &PanelState) -> Vec<Row> {
         }
     }
     rows
+}
+
+/// Measure the natural content width of the bar for the given state.
+pub fn estimate_bar_width(state: &PanelState, font_system: &mut FontSystem) -> u32 {
+    let rows = build_rows(state);
+    if rows.is_empty() {
+        return 0;
+    }
+    let mut buffer =
+        TextBuffer::new(font_system, Metrics::new(15.0, LINE_HEIGHT as f32));
+    let text = rows
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    buffer.set_size(font_system, None, None);
+    buffer.set_text(font_system, &text, Attrs::new(), Shaping::Advanced);
+    let mut max_line = 0.0f32;
+    for run in buffer.layout_runs() {
+        max_line = max_line.max(run.line_w);
+    }
+    let mut total = max_line.ceil() as u32 + 2 * PADDING;
+    if state.has_previous || state.has_next {
+        total += 2 * PAGER_W;
+    }
+    total.clamp(160, 2000)
 }
 
 /// Paint the bar into a BGRA pixel buffer (wl_shm ARGB8888 order). Returns
@@ -242,7 +268,7 @@ impl Panel {
         if desired_height != self.desired_height {
             self.desired_height = desired_height;
             self.dirty = true;
-            let width = self.configured_size.0.max(1);
+            let width = estimate_bar_width(&state, &mut self.font_system).max(1);
             // A bottom-anchored layer may not request height 0; use height 1
             // with no attached buffer to stay invisible while hidden.
             layer.set_size(width, desired_height.max(1));
@@ -552,10 +578,10 @@ fn run_renderer(
         Some("fcitx5-niri-panel"),
         None,
     );
-    layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_anchor(Anchor::BOTTOM);
     layer.set_exclusive_zone(0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-    layer.set_size(0, 1);
+    layer.set_size(1, 1);
     layer.commit();
 
     let mut panel = Panel {
