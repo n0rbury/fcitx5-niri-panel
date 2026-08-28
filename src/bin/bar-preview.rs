@@ -10,16 +10,16 @@ use fcitx5_niri_panel::render::{estimate_bar_width, render_bar_pixels};
 
 fn state_vertical() -> PanelState {
     let mut s = PanelState::default();
-    s.preedit = "ni hao".into();
+    s.preedit = "zhong guo".into();
     s.preedit_visible = true;
-    s.preedit_cursor = 6;
+    s.preedit_cursor = 9;
     s.candidates = vec![
-        Candidate { label: "1 ".into(), text: "你好".into(), attr: String::new() },
-        Candidate { label: "2 ".into(), text: "拟好".into(), attr: String::new() },
-        Candidate { label: "3 ".into(), text: "泥蒿".into(), attr: String::new() },
-        Candidate { label: "4 ".into(), text: "你".into(), attr: String::new() },
-        Candidate { label: "5 ".into(), text: "泥".into(), attr: String::new() },
-        Candidate { label: "6 ".into(), text: "拟".into(), attr: String::new() },
+        Candidate { label: "1 ".into(), text: "中古".into(), attr: String::new() },
+        Candidate { label: "2 ".into(), text: "钟鼓".into(), attr: String::new() },
+        Candidate { label: "3 ".into(), text: "中谷".into(), attr: String::new() },
+        Candidate { label: "4 ".into(), text: "忠骨".into(), attr: String::new() },
+        Candidate { label: "5 ".into(), text: "终古".into(), attr: String::new() },
+        Candidate { label: "6 ".into(), text: "中".into(), attr: String::new() },
     ];
     s.selected = 0;
     s.has_next = true;

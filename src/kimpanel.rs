@@ -142,10 +142,11 @@ impl StateStore {
         Ok(())
     }
 
-    fn set_spot(&self, rect: Rect, scale: Option<f64>) {
+    fn set_spot(&self, rect: Rect, scale: Option<f64>, absolute: bool) {
         self.mutate(move |s| {
             s.spot = Some(rect);
             s.scale = scale;
+            s.spot_absolute = absolute;
         });
         match scale {
             Some(scale) => println!(
@@ -306,11 +307,11 @@ impl ImpanelV2 {
     }
 
     async fn set_spot_rect(&self, x: i32, y: i32, width: i32, height: i32) {
-        self.store.set_spot(Rect { x, y, width, height }, None);
+        self.store.set_spot(Rect { x, y, width, height }, None, true);
     }
 
     async fn set_relative_spot_rect(&self, x: i32, y: i32, width: i32, height: i32) {
-        self.store.set_spot(Rect { x, y, width, height }, None);
+        self.store.set_spot(Rect { x, y, width, height }, None, false);
     }
 
     async fn set_relative_spot_rect_v2(
@@ -322,7 +323,7 @@ impl ImpanelV2 {
         scale: f64,
     ) {
         self.store
-            .set_spot(Rect { x, y, width, height }, Some(scale));
+            .set_spot(Rect { x, y, width, height }, Some(scale), false);
     }
 
     #[zbus(signal)]

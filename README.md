@@ -14,7 +14,9 @@ Clicking a candidate row selects it: the panel emits the Kimpanel
 `SelectCandidate` signal, which Fcitx answers by committing the candidate.
 When the candidate list has more than one page (Rime's `has_next`), paging
 arrows appear on the right edge of the bar; clicking them pages through the
-list via the `LookupTablePageUp`/Down signals.
+list via the `LookupTablePageUp`/Down signals. The bar is opaque,
+content-sized, and follows the caret for input contexts that report an
+absolute spot rectangle (the X11/XWayland path, e.g. Feishu).
 
 The long-term design is:
 

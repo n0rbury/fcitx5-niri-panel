@@ -47,6 +47,9 @@ pub struct PanelState {
     pub layout: CandidateLayout,
     pub spot: Option<Rect>,
     pub scale: Option<f64>,
+    /// Set when the last spot rect was absolute (X11-style global
+    /// coordinates) rather than relative to a Wayland text-input surface.
+    pub spot_absolute: bool,
 }
 
 impl PanelState {

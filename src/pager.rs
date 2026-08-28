@@ -53,10 +53,11 @@ pub fn draw_glyph(
                 }
                 let idx = ((yy as u32) * w + xx as u32) as usize * 4;
                 let dst_a = px[idx + 3];
-                let out_a = a as u16 + (dst_a as u16 * (255 - a as u16)) / 255;
+                let ai = a as u16;
+                let out_a = ai + (dst_a as u16 * (255 - ai)) / 255;
                 for (c, off) in [(r, 2usize), (g, 1), (b, 0)] {
                     px[idx + off] =
-                        (c as u16 + (px[idx + off] as u16 * (255 - a as u16)) / 255).min(255) as u8;
+                        ((c as u16 * ai + px[idx + off] as u16 * (255 - ai)) / 255).min(255) as u8;
                 }
                 px[idx + 3] = out_a.min(255) as u8;
             }

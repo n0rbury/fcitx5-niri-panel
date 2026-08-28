@@ -39,6 +39,9 @@ const PADDING: u32 = 6;
 /// Extra margin so the last glyph row is never clipped: cosmic-text lays out
 /// the first line with a ~line-height/2 top offset.
 const BOTTOM_MARGIN: u32 = 8;
+/// Niri places a top-left anchored layer surface FOLLOW_Y_OFFSET pixels
+/// below the top margin (measured 148 -> 182, 548 -> 582 on this machine).
+const FOLLOW_Y_OFFSET: i32 = 34;
 const PAGER_W: u32 = 48;
 
 const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff]; // RGBA
@@ -189,11 +192,12 @@ pub fn render_bar_pixels(
                 }
                 let idx = ((yy as u32) * w + xx as u32) as usize * 4;
                 let dst_a = px[idx + 3];
-                let out_a = a as u16 + (dst_a as u16 * (255 - a as u16)) / 255;
+                let ai = a as u16;
+                let out_a = ai + (dst_a as u16 * (255 - ai)) / 255;
                 for (c, off) in [(r, 2usize), (g, 1), (b, 0)] {
                     px[idx + off] =
-                        (c as u16 + (px[idx + off] as u16 * (255 - a as u16)) / 255)
-                            .min(255) as u8;
+                        ((c as u16 * ai + px[idx + off] as u16 * (255 - ai)) / 255).min(255)
+                            as u8;
                 }
                 px[idx + 3] = out_a.min(255) as u8;
             }
@@ -245,6 +249,8 @@ struct Panel {
     pool: Option<SlotPool>,
     configured_size: (u32, u32),
     desired_height: u32,
+    desired_width: u32,
+    layout: (Anchor, (i32, i32)),
     dirty: bool,
     font_system: FontSystem,
     swash: SwashCache,
@@ -263,20 +269,45 @@ impl Panel {
         } else {
             0
         };
+        let desired_width = estimate_bar_width(&state, &mut self.font_system).max(1);
 
         let Some(layer) = self.layer.clone() else { return };
-        if desired_height != self.desired_height {
+        if desired_height != self.desired_height || desired_width != self.desired_width {
             self.desired_height = desired_height;
+            self.desired_width = desired_width;
             self.dirty = true;
-            let width = estimate_bar_width(&state, &mut self.font_system).max(1);
             // A bottom-anchored layer may not request height 0; use height 1
             // with no attached buffer to stay invisible while hidden.
-            layer.set_size(width, desired_height.max(1));
+            layer.set_size(desired_width, desired_height.max(1));
             layer.commit();
             if desired_height == 0 {
                 return;
             }
         }
+
+        // Follow the absolute spot rect (X11/XWayland path) by anchoring to
+        // the top-left with margins; otherwise center at the screen bottom.
+        let layout = if visible && state.spot_absolute && state.spot.is_some() {
+            let spot = state.spot.expect("checked");
+            (
+                Anchor::TOP | Anchor::LEFT,
+                (
+                    spot.x.max(0),
+                    (spot.y - desired_height as i32 - FOLLOW_Y_OFFSET).max(0),
+                ),
+            )
+        } else {
+            (Anchor::BOTTOM, (0, 0))
+        };
+        if layout != self.layout {
+            self.layout = layout;
+            self.dirty = true;
+            let (mleft, mtop) = layout.1;
+            layer.set_anchor(layout.0);
+            layer.set_margin(mtop, 0, 0, mleft);
+            layer.commit();
+        }
+
         if !self.dirty {
             return;
         }
@@ -324,7 +355,9 @@ impl Panel {
             smithay_client_toolkit::reexports::client::protocol::wl_shm::Format::Argb8888,
         ) {
             Ok((buffer, canvas)) => {
-                canvas.copy_from_slice(&px);
+                // The reused slot may be larger than the current frame; only
+                // the first w*h*4 bytes belong to this buffer.
+                canvas[..px.len()].copy_from_slice(&px);
                 let Some(layer) = self.layer.clone() else { return };
                 layer.wl_surface().damage_buffer(0, 0, w as i32, height as i32);
                 buffer.attach_to(layer.wl_surface()).expect("attach buffer");
@@ -598,6 +631,8 @@ fn run_renderer(
         pool: None,
         configured_size: (0, 0),
         desired_height: 0,
+        desired_width: 0,
+        layout: (Anchor::BOTTOM, (0, 0)),
         dirty: true,
         font_system: FontSystem::new(),
         swash: SwashCache::new(),
