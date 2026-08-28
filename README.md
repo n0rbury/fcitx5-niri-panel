@@ -12,6 +12,9 @@ bar at the bottom of the screen while composing, with the selected row
 highlighted, and the bar hides again when input is committed or focus leaves.
 Clicking a candidate row selects it: the panel emits the Kimpanel
 `SelectCandidate` signal, which Fcitx answers by committing the candidate.
+When the candidate list has more than one page (Rime's `has_next`), paging
+arrows appear on the right edge of the bar; clicking them pages through the
+list via the `LookupTablePageUp`/Down signals.
 
 The long-term design is:
 

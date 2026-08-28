@@ -32,13 +32,16 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
 use crate::kimpanel::StateStore;
 use crate::model::{CandidateLayout, PanelState};
+use crate::pager::{draw_glyph, pager_hit};
 
 const LINE_HEIGHT: u32 = 22;
 const PADDING: u32 = 6;
+const PAGER_W: u32 = 48;
 
 const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xe8]; // RGBA
 const SEL_BG_COLOR: [u8; 4] = [0x2f, 0x5f, 0x8f, 0xff];
 const TEXT_COLOR: TextColor = cosmic_text::Color(0xFF_F0_F0_F0);
+const PAGER_ACTIVE: TextColor = cosmic_text::Color(0xFF_B9_C8_DD);
 
 struct Row {
     text: String,
@@ -229,6 +232,38 @@ impl Panel {
             },
         );
 
+        // Right-edge paging indicators.
+        if state.has_previous || state.has_next {
+            let center_y = (height as i32 - LINE_HEIGHT as i32) / 2;
+            let right = w as i32;
+            if state.has_previous {
+                draw_glyph(
+                    &mut px,
+                    w,
+                    height,
+                    &mut self.font_system,
+                    &mut self.swash,
+                    '\u{2039}',
+                    right - 2 * PAGER_W as i32 + 20,
+                    center_y,
+                    PAGER_ACTIVE,
+                );
+            }
+            if state.has_next {
+                draw_glyph(
+                    &mut px,
+                    w,
+                    height,
+                    &mut self.font_system,
+                    &mut self.swash,
+                    '\u{203a}',
+                    right - PAGER_W as i32 + 20,
+                    center_y,
+                    PAGER_ACTIVE,
+                );
+            }
+        }
+
         let pool = match self.pool.as_mut() {
             Some(pool) => pool,
             None => {
@@ -350,11 +385,26 @@ impl PointerHandler for Panel {
                 if button != 272 {
                     continue;
                 }
-                let rows = build_rows(&self.store.snapshot());
+                let state = self.store.snapshot();
+                let (w, h) = self.configured_size;
+                let x = event.position.0.max(0.0) as u32;
+                let y = event.position.1.max(0.0) as u32;
+                if y < h && w > 0 {
+                    if let Some(member) = pager_hit(state.has_previous, state.has_next, w, x) {
+                        if self.verbose {
+                            eprintln!("[render] click pager {member}");
+                        }
+                        let dbus = self.dbus.clone();
+                        let _ = self
+                            .rt
+                            .block_on(crate::kimpanel::emit_to_fcitx(&dbus, member, &()));
+                        continue;
+                    }
+                }
+                let rows = build_rows(&state);
                 if rows.is_empty() {
                     continue;
                 }
-                let y = event.position.1.max(0.0) as u32;
                 let row = (y.saturating_sub(PADDING)) / LINE_HEIGHT;
                 if let Some(candidate) = rows.get(row as usize).and_then(|row| row.candidate) {
                     if self.verbose {
