@@ -36,7 +36,6 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
 use crate::kimpanel::StateStore;
 use crate::model::{CandidateLayout, PanelState};
-use crate::pager::{draw_glyph, pager_hit};
 
 const LINE_HEIGHT: u32 = 22;
 const PADDING: u32 = 6;
@@ -46,12 +45,10 @@ const BOTTOM_MARGIN: u32 = 8;
 /// Niri places a top-left anchored layer surface this many pixels below the
 /// top margin (calibrated live on this machine; margin == surface top).
 const FOLLOW_Y_OFFSET: i32 = -2;
-const PAGER_W: u32 = 48;
 
 const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff]; // RGBA
 const SEL_BG_COLOR: [u8; 4] = [0x2f, 0x5f, 0x8f, 0xff];
 const TEXT_COLOR: TextColor = cosmic_text::Color(0xFF_F0_F0_F0);
-const PAGER_ACTIVE: TextColor = cosmic_text::Color(0xFF_B9_C8_DD);
 
 struct Row {
     text: String,
@@ -59,22 +56,25 @@ struct Row {
     /// Visual index to report to fcitx on click (includes the aux-down row),
     /// set only for candidate rows.
     candidate: Option<usize>,
+    /// True for the single joined row of a horizontally-laid-out candidate
+    /// list; clicks on it must be resolved by x position.
+    horizontal: bool,
 }
 
 fn build_rows(state: &PanelState) -> Vec<Row> {
     let mut rows = Vec::new();
     if state.preedit_visible && !state.preedit.is_empty() {
-        rows.push(Row { text: state.preedit.clone(), selected: false, candidate: None });
+        rows.push(Row { text: state.preedit.clone(), selected: false, candidate: None, horizontal: false });
     } else if state.aux_visible && !state.aux.is_empty() {
-        rows.push(Row { text: state.aux.clone(), selected: false, candidate: None });
+        rows.push(Row { text: state.aux.clone(), selected: false, candidate: None, horizontal: false });
     }
     if !state.aux_down.is_empty() {
-        rows.push(Row { text: state.aux_down.clone(), selected: false, candidate: None });
+        rows.push(Row { text: state.aux_down.clone(), selected: false, candidate: None, horizontal: false });
     }
     let aux_row = !state.aux_down.is_empty();
     if !state.candidates.is_empty() {
         match state.layout {
-            CandidateLayout::Horizontal => {
+            CandidateLayout::Horizontal | CandidateLayout::NotSet => {
                 let mut text = String::new();
                 for (i, c) in state.candidates.iter().enumerate() {
                     if i > 0 {
@@ -83,7 +83,12 @@ fn build_rows(state: &PanelState) -> Vec<Row> {
                     text.push_str(&c.label);
                     text.push_str(&c.text);
                 }
-                rows.push(Row { text, selected: false, candidate: None });
+                rows.push(Row {
+                    text,
+                    selected: state.selected >= 0,
+                    candidate: None,
+                    horizontal: true,
+                });
             }
             _ => {
                 for (i, c) in state.candidates.iter().enumerate() {
@@ -91,12 +96,47 @@ fn build_rows(state: &PanelState) -> Vec<Row> {
                         text: format!("{}{}", c.label, c.text),
                         selected: i == state.selected as usize,
                         candidate: Some(i + usize::from(aux_row)),
+                        horizontal: false,
                     });
                 }
             }
         }
     }
     rows
+}
+
+/// Width in pixels of text at the bar's font metrics, unwrapped.
+fn text_width(font_system: &mut FontSystem, text: &str) -> f32 {
+    let mut buffer =
+        TextBuffer::new(font_system, Metrics::new(15.0, LINE_HEIGHT as f32));
+    buffer.set_size(font_system, None, None);
+    buffer.set_text(font_system, text, Attrs::new(), Shaping::Advanced);
+    buffer
+        .layout_runs()
+        .next()
+        .map(|run| run.line_w.ceil())
+        .unwrap_or(0.0)
+}
+
+/// Screen-x ranges of each candidate in the horizontal row, matching the
+/// exact strings painted by build_rows (label+text, three-space separators).
+fn horizontal_segments(
+    state: &PanelState,
+    font_system: &mut FontSystem,
+) -> Vec<(i32, i32)> {
+    let mut segments = Vec::new();
+    if state.candidates.is_empty() {
+        return segments;
+    }
+    let sep = text_width(font_system, "   ") as i32;
+    let mut x = 0i32;
+    for candidate in &state.candidates {
+        let text = format!("{}{}", candidate.label, candidate.text);
+        let w = text_width(font_system, &text) as i32;
+        segments.push((x, x + w));
+        x += w + sep;
+    }
+    segments
 }
 
 /// Measure the natural content width of the bar for the given state.
@@ -119,9 +159,6 @@ pub fn estimate_bar_width(state: &PanelState, font_system: &mut FontSystem) -> u
         max_line = max_line.max(run.line_w);
     }
     let mut total = max_line.ceil() as u32 + 2 * PADDING;
-    if state.has_previous || state.has_next {
-        total += 2 * PAGER_W;
-    }
     total.clamp(160, 2000)
 }
 
@@ -166,14 +203,21 @@ pub fn render_bar_pixels(
             // Glyph tops sit ~0.9 * font size above line_y; measured ink top
             // is line_y - 14 for our 15px font. Cover the full row slot.
             let row_top = base_y - 14;
+            let x_range = if rows[sel].horizontal {
+                let segs = horizontal_segments(state, font_system);
+                let idx = state.selected.max(0) as usize;
+                segs.get(idx).copied().unwrap_or((0, w as i32))
+            } else {
+                (0, w as i32)
+            };
             for yy in row_top..(row_top + LINE_HEIGHT as i32) {
                 if yy < 0 || yy as u32 >= height {
                     continue;
                 }
-                for pixel in px
-                    [(yy as usize) * w as usize * 4..(yy as usize + 1) * w as usize * 4]
-                    .chunks_exact_mut(4)
-                {
+                let row_start = (yy as usize) * w as usize * 4;
+                let from = row_start + x_range.0.max(0) as usize * 4;
+                let to = row_start + x_range.1.clamp(0, w as i32) as usize * 4;
+                for pixel in px[from..to].chunks_exact_mut(4) {
                     pixel.copy_from_slice(&bgra(
                         SEL_BG_COLOR[0], SEL_BG_COLOR[1], SEL_BG_COLOR[2], SEL_BG_COLOR[3],
                     ));
@@ -209,37 +253,6 @@ pub fn render_bar_pixels(
             }
         }
     });
-
-    if state.has_previous || state.has_next {
-        let center_y = (height as i32 - LINE_HEIGHT as i32) / 2;
-        let right = w as i32;
-        if state.has_previous {
-            draw_glyph(
-                &mut px,
-                w,
-                height,
-                font_system,
-                swash,
-                '\u{2039}',
-                right - 2 * PAGER_W as i32 + 20,
-                center_y,
-                PAGER_ACTIVE,
-            );
-        }
-        if state.has_next {
-            draw_glyph(
-                &mut px,
-                w,
-                height,
-                font_system,
-                swash,
-                '\u{203a}',
-                right - PAGER_W as i32 + 20,
-                center_y,
-                PAGER_ACTIVE,
-            );
-        }
-    }
 
     Some(px)
 }
@@ -564,36 +577,33 @@ impl PointerHandler for Panel {
                     continue;
                 }
                 let state = self.store.snapshot();
-                let (w, h) = self.configured_size;
                 let x = event.position.0.max(0.0) as u32;
                 let y = event.position.1.max(0.0) as u32;
-                if y < h && w > 0 {
-                    if let Some(member) = pager_hit(state.has_previous, state.has_next, w, x) {
-                        if self.verbose {
-                            eprintln!("[render] click pager {member}");
-                        }
-                        let dbus = self.dbus.clone();
-                        let _ = self
-                            .rt
-                            .block_on(crate::kimpanel::emit_to_fcitx(&dbus, member, &()));
-                        continue;
-                    }
-                }
                 let rows = build_rows(&state);
                 if rows.is_empty() {
                     continue;
                 }
                 let row = (y.saturating_sub(PADDING)) / LINE_HEIGHT;
-                if let Some(candidate) = rows.get(row as usize).and_then(|row| row.candidate) {
-                    if self.verbose {
-                        eprintln!("[render] click selects candidate {candidate}");
+                if let Some(r) = rows.get(row as usize) {
+                    let candidate = if r.horizontal {
+                        let segs = horizontal_segments(&state, &mut self.font_system);
+                        segs.iter()
+                            .position(|(s, e)| x >= *s as u32 && x < *e as u32)
+                            .map(|i| i + usize::from(!state.aux_down.is_empty()))
+                    } else {
+                        r.candidate
+                    };
+                    if let Some(candidate) = candidate {
+                        if self.verbose {
+                            eprintln!("[render] click selects candidate {candidate}");
+                        }
+                        let dbus = self.dbus.clone();
+                        let _ = self.rt.block_on(crate::kimpanel::emit_to_fcitx(
+                            &dbus,
+                            "SelectCandidate",
+                            &(candidate as i32,),
+                        ));
                     }
-                    let dbus = self.dbus.clone();
-                    let _ = self.rt.block_on(crate::kimpanel::emit_to_fcitx(
-                        &dbus,
-                        "SelectCandidate",
-                        &(candidate as i32,),
-                    ));
                 }
             }
         }

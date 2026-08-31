@@ -5,10 +5,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bin_src="$repo_root/target/release/fcitx5-niri-panel"
 
-if [[ ! -x "$bin_src" ]]; then
-    echo "release binary not found at $bin_src; building..." >&2
-    (cd "$repo_root" && cargo build --release)
-fi
+# Always build: cargo is incremental, so this is fast when up to date.
+# (A mtime-based staleness check missed a source edit once and deployed
+# a stale binary.)
+(cd "$repo_root" && cargo build --release)
 
 install -Dm755 "$bin_src" "$HOME/.local/bin/fcitx5-niri-panel"
 mkdir -p "$HOME/.config/systemd/user"
