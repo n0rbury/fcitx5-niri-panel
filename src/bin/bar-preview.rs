@@ -90,8 +90,13 @@ fn main() {
         ("horizontal", state_horizontal()),
     ] {
         let w = estimate_bar_width(&state, &mut fs).max(1);
-        let rows_hint = if name == "vertical" { 7 } else { 7 };
-        let h = rows_hint * 22 + 20;
+        // Rows actually built: vertical = preedit + 6 candidates;
+        // aux_down = aux row + 6 candidates; horizontal = aux + 1 row.
+        let row_count = match name {
+            "vertical" | "aux_down" => 7,
+            _ => 2,
+        };
+        let h = row_count * 22;
         let px = render_bar_pixels(&state, w, h, &mut fs, &mut swash).expect("render");
         let path = format!("/tmp/bar-{name}.ppm");
         write_ppm(&path, w, h, &px);

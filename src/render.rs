@@ -7,7 +7,7 @@
 //! bar does not follow the caret; it appears whenever input state is visible.
 
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cosmic_text::{
     Attrs, Buffer as TextBuffer, Color as TextColor, FontSystem, Metrics, Shaping, SwashCache,
@@ -38,17 +38,25 @@ use crate::kimpanel::StateStore;
 use crate::model::{CandidateLayout, PanelState};
 
 const LINE_HEIGHT: u32 = 22;
-const PADDING: u32 = 6;
-/// Extra margin so the last glyph row is never clipped: cosmic-text lays out
-/// the first line with a ~line-height/2 top offset.
-const BOTTOM_MARGIN: u32 = 8;
+/// Horizontal inset. Zero: text and the full-row highlight run flush to the
+/// panel edges, so no dark band shows on the left or right.
+const PADDING: u32 = 0;
+// Each row occupies exactly one 22px slot; a 15px font's baseline sits 14px
+// below the slot top, which fills the slot with no clipping (CJK glyphs
+// ascend ~16px and descend ~3px around that baseline).
 /// Niri places a top-left anchored layer surface this many pixels below the
 /// top margin (calibrated live on this machine; margin == surface top).
 const FOLLOW_Y_OFFSET: i32 = -2;
 
-const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff]; // RGBA
+// Dark skin (the approved look). All colors are straight RGBA; they are
+// premultiplied into the ARGB8888 buffer while blending.
+const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff];
+const BORDER_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff];
 const SEL_BG_COLOR: [u8; 4] = [0x2f, 0x5f, 0x8f, 0xff];
 const TEXT_COLOR: TextColor = cosmic_text::Color(0xFF_F0_F0_F0);
+const SEL_TEXT_COLOR: TextColor = cosmic_text::Color(0xFF_F0_F0_F0);
+const BAR_RADIUS: f32 = 0.0;
+const PILL_RADIUS: f32 = 0.0;
 
 struct Row {
     text: String,
@@ -59,6 +67,36 @@ struct Row {
     /// True for the single joined row of a horizontally-laid-out candidate
     /// list; clicks on it must be resolved by x position.
     horizontal: bool,
+}
+
+/// Metrics of the laid-out text, taken from the actual shaped runs.
+struct TextLayout {
+    /// y of the first run's baseline, relative to the text buffer top.
+    first_baseline: i32,
+    /// y of the last run's baseline.
+    last_baseline: i32,
+    /// Widest run width.
+    max_width: f32,
+}
+
+fn layout_metrics(buffer: &TextBuffer) -> TextLayout {
+    let mut first_baseline = 0i32;
+    let mut last_baseline = 0i32;
+    let mut max_width = 0.0f32;
+    let mut seen = false;
+    for run in buffer.layout_runs() {
+        if !seen {
+            first_baseline = run.line_y.round() as i32;
+            seen = true;
+        }
+        last_baseline = run.line_y.round() as i32;
+        max_width = max_width.max(run.line_w);
+    }
+    if !seen {
+        first_baseline = LINE_HEIGHT as i32 / 2 + 3;
+        last_baseline = first_baseline;
+    }
+    TextLayout { first_baseline, last_baseline, max_width }
 }
 
 fn build_rows(state: &PanelState) -> Vec<Row> {
@@ -154,12 +192,93 @@ pub fn estimate_bar_width(state: &PanelState, font_system: &mut FontSystem) -> u
         .join("\n");
     buffer.set_size(font_system, None, None);
     buffer.set_text(font_system, &text, Attrs::new(), Shaping::Advanced);
-    let mut max_line = 0.0f32;
-    for run in buffer.layout_runs() {
-        max_line = max_line.max(run.line_w);
+    let metrics = layout_metrics(&buffer);
+    let total = metrics.max_width.ceil() as u32 + 2 * PADDING;
+    total.clamp(1, 2000)
+}
+
+/// Paint a filled rounded rectangle (straight-alpha RGBA color premultiplied
+/// into the ARGB8888 buffer).
+fn fill_round_rect(
+    px: &mut [u8],
+    w: u32,
+    h: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    radius: f32,
+    color: [u8; 4],
+) {
+    let [r, g, b, a] = color;
+    if a == 0 {
+        return;
     }
-    let mut total = max_line.ceil() as u32 + 2 * PADDING;
-    total.clamp(160, 2000)
+    let aa = a as u32;
+    let rad = radius.max(0.0);
+    for yy in y0.max(0)..y1.min(h as i32) {
+        for xx in x0.max(0)..x1.min(w as i32) {
+            // Distance of the pixel center to the rounded-rect interior.
+            let cx = xx as f32 + 0.5;
+            let cy = yy as f32 + 0.5;
+            let qx = (x0 as f32 + rad - cx).max(0.0);
+            let qy = (y0 as f32 + rad - cy).max(0.0);
+            let qx2 = (cx - (x1 as f32 - rad)).max(0.0);
+            let qy2 = (cy - (y1 as f32 - rad)).max(0.0);
+            let dx = qx.max(qx2);
+            let dy = qy.max(qy2);
+            let d = (dx * dx + dy * dy).sqrt();
+            let cov = if d <= rad {
+                255u32
+            } else {
+                // ~1px anti-aliased edge.
+                (255.0 - (d - rad)).max(0.0).min(255.0) as u32
+            };
+            let idx = (yy as usize * w as usize + xx as usize) * 4;
+            let src_a = (aa * cov / 255) as u16;
+            let dst_a = px[idx + 3] as u16;
+            let out_a = src_a + dst_a * (255 - src_a) / 255;
+            for (c, off) in [(r, 2usize), (g, 1), (b, 0)] {
+                px[idx + off] = ((c as u16 * src_a + px[idx + off] as u16 * (255 - src_a)) / 255)
+                    .min(255) as u8;
+            }
+            px[idx + 3] = out_a.min(255) as u8;
+        }
+    }
+}
+
+/// Outline of a rounded rectangle (1px border), blending on top.
+fn stroke_round_rect(
+    px: &mut [u8],
+    w: u32,
+    h: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    radius: f32,
+    color: [u8; 4],
+) {
+    fill_round_rect(px, w, h, x0, y0, x1, y1, radius, color);
+    fill_round_rect(
+        px, w, h,
+        x0 + 1, y0 + 1, x1 - 1, y1 - 1,
+        (radius - 1.0).max(0.0),
+        [0, 0, 0, 0],
+    );
+}
+
+/// Blend one straight-alpha RGBA color over a pixel.
+fn blend_px(px: &mut [u8], idx: usize, color: [u8; 4]) {
+    let [r, g, b, a] = color;
+    let src_a = a as u16;
+    let dst_a = px[idx + 3] as u16;
+    let out_a = src_a + dst_a * (255 - src_a) / 255;
+    for (c, off) in [(r, 2usize), (g, 1), (b, 0)] {
+        px[idx + off] =
+            ((c as u16 * src_a + px[idx + off] as u16 * (255 - src_a)) / 255).min(255) as u8;
+    }
+    px[idx + 3] = out_a.min(255) as u8;
 }
 
 /// Paint the bar into a BGRA pixel buffer (wl_shm ARGB8888 order). Returns
@@ -176,83 +295,113 @@ pub fn render_bar_pixels(
         return None;
     }
 
-    let mut px = vec![0u8; w as usize * height as usize * 4];
-    for chunk in px.chunks_exact_mut(4) {
-        chunk.copy_from_slice(&BG_COLOR);
-    }
     let bgra = |r: u8, g: u8, b: u8, a: u8| [b, g, r, a];
 
+    // Layout first: the bar is one exact 22px slot per row; each slot gets
+    // the same baseline (14px down) so text and highlight geometry agree.
     let mut text_buffer =
         TextBuffer::new(font_system, Metrics::new(15.0, LINE_HEIGHT as f32));
-    text_buffer.set_size(font_system, Some(w as f32), Some(height as f32));
     let text = rows
         .iter()
         .map(|row| row.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    text_buffer.set_size(font_system, Some(w as f32), Some(height as f32));
     text_buffer.set_text(
         font_system,
         &text,
         Attrs::new().color(TEXT_COLOR),
         Shaping::Advanced,
     );
+    let layout = layout_metrics(&text_buffer);
+    // Snap the first shaped baseline to 14px below the bar top; every row
+    // then lands on its own slot grid (14, 36, 58, ...).
+    let slot_baseline = LINE_HEIGHT as i32 / 2 + 5;
+    let dy = slot_baseline - layout.first_baseline;
+    // Horizontal text inset; bar width is content + 2 * PADDING.
+    const TEXT_X: i32 = PADDING as i32;
 
-    if let Some(sel) = rows.iter().position(|row| row.selected) {
-        if let Some(run) = text_buffer.layout_runs().nth(sel) {
-            let base_y = run.line_y.round() as i32;
-            // Glyph tops sit ~0.9 * font size above line_y; measured ink top
-            // is line_y - 14 for our 15px font. Cover the full row slot.
-            let row_top = base_y - 14;
-            let x_range = if rows[sel].horizontal {
-                let segs = horizontal_segments(state, font_system);
-                let idx = state.selected.max(0) as usize;
-                segs.get(idx).copied().unwrap_or((0, w as i32))
-            } else {
-                (0, w as i32)
-            };
-            for yy in row_top..(row_top + LINE_HEIGHT as i32) {
+    let mut px = vec![0u8; w as usize * height as usize * 4];
+
+    // Background with rounded corners; alpha makes the corners transparent.
+    fill_round_rect(
+        &mut px, w, height,
+        0, 0, w as i32, height as i32,
+        BAR_RADIUS,
+        BG_COLOR,
+    );
+    stroke_round_rect(
+        &mut px, w, height,
+        0, 0, w as i32, height as i32,
+        BAR_RADIUS,
+        BORDER_COLOR,
+    );
+
+    for (row_idx, run) in text_buffer.layout_runs().enumerate() {
+        let row = &rows[row_idx];
+        if !row.selected {
+            continue;
+        }
+        let base_y = run.line_y.round() as i32;
+        let slot_top = (row_idx as i32) * LINE_HEIGHT as i32;
+        let x_range = if row.horizontal {
+            let segs = horizontal_segments(state, font_system);
+            let idx = state.selected.max(0) as usize;
+            segs
+                .get(idx)
+                .map(|(a, b)| (a + TEXT_X, b + TEXT_X))
+                .unwrap_or((TEXT_X, w as i32 - TEXT_X))
+        } else {
+            (TEXT_X - 2, w as i32 - TEXT_X + 2)
+        };
+        fill_round_rect(
+            &mut px, w, height,
+            x_range.0, slot_top, x_range.1, slot_top + LINE_HEIGHT as i32,
+            PILL_RADIUS,
+            SEL_BG_COLOR,
+        );
+    }
+
+    // Draw text per row so the selected row can use a light color.
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut row_buffer =
+            TextBuffer::new(font_system, Metrics::new(15.0, LINE_HEIGHT as f32));
+        row_buffer.set_size(font_system, Some(w as f32), Some(LINE_HEIGHT as f32));
+        let color = if row.selected {
+            SEL_TEXT_COLOR
+        } else {
+            TEXT_COLOR
+        };
+        row_buffer.set_text(
+            font_system,
+            &row.text,
+            Attrs::new().color(color),
+            Shaping::Advanced,
+        );
+        let row_layout = layout_metrics(&row_buffer);
+        // Align this row's baseline with the combined-layout baseline.
+        let target_baseline = slot_baseline + (row_idx as i32) * LINE_HEIGHT as i32;
+        let dy = target_baseline - row_layout.first_baseline;
+        row_buffer.draw(font_system, swash, color, |x, y, gw, gh, gcolor| {
+            let c = gcolor.0;
+            let a = ((c >> 24) & 0xff) as u8;
+            let r = ((c >> 16) & 0xff) as u8;
+            let g = ((c >> 8) & 0xff) as u8;
+            let b = (c & 0xff) as u8;
+            for yy in (y + dy)..(y + dy + gh as i32) {
                 if yy < 0 || yy as u32 >= height {
                     continue;
                 }
-                let row_start = (yy as usize) * w as usize * 4;
-                let from = row_start + x_range.0.max(0) as usize * 4;
-                let to = row_start + x_range.1.clamp(0, w as i32) as usize * 4;
-                for pixel in px[from..to].chunks_exact_mut(4) {
-                    pixel.copy_from_slice(&bgra(
-                        SEL_BG_COLOR[0], SEL_BG_COLOR[1], SEL_BG_COLOR[2], SEL_BG_COLOR[3],
-                    ));
+                for xx in (x + TEXT_X)..(x + TEXT_X + gw as i32) {
+                    if xx < 0 || xx as u32 >= w {
+                        continue;
+                    }
+                    let idx = (yy as u32 * w + xx as u32) as usize * 4;
+                    blend_px(&mut px, idx, bgra(r, g, b, a));
                 }
             }
-        }
+        });
     }
-
-    text_buffer.draw(font_system, swash, TEXT_COLOR, |x, y, gw, gh, color| {
-        let c = color.0;
-        let a = ((c >> 24) & 0xff) as u8;
-        let r = ((c >> 16) & 0xff) as u8;
-        let g = ((c >> 8) & 0xff) as u8;
-        let b = (c & 0xff) as u8;
-        for yy in y..(y + gh as i32) {
-            if yy < 0 || yy as u32 >= height {
-                continue;
-            }
-            for xx in x..(x + gw as i32) {
-                if xx < 0 || xx as u32 >= w {
-                    continue;
-                }
-                let idx = ((yy as u32) * w + xx as u32) as usize * 4;
-                let dst_a = px[idx + 3];
-                let ai = a as u16;
-                let out_a = ai + (dst_a as u16 * (255 - ai)) / 255;
-                for (c, off) in [(r, 2usize), (g, 1), (b, 0)] {
-                    px[idx + off] =
-                        ((c as u16 * ai + px[idx + off] as u16 * (255 - ai)) / 255).min(255)
-                            as u8;
-                }
-                px[idx + 3] = out_a.min(255) as u8;
-            }
-        }
-    });
 
     Some(px)
 }
@@ -335,7 +484,9 @@ impl Panel {
         let rows = build_rows(&state);
         let visible = state.visible && !rows.is_empty();
         let desired_height = if visible {
-            rows.len() as u32 * LINE_HEIGHT + 2 * PADDING + BOTTOM_MARGIN
+            // One exact 22px slot per row; the highlight fills the whole
+            // selected slot so no background bands are possible.
+            rows.len() as u32 * LINE_HEIGHT
         } else {
             0
         };
@@ -777,8 +928,27 @@ fn run_renderer(
             panel.dirty = true;
         }
         let qh = queue.handle();
-        panel.repaint(&qh);
+        // Coalesce bursts of D-Bus updates (fcitx sends preedit and lookup
+        // table as separate messages): repaint at most every ~16ms so the
+        // intermediate single-row frame is never shown.
+        static LAST_PAINT: std::sync::Mutex<Option<Instant>> =
+            std::sync::Mutex::new(None);
+        let mut throttle = false;
+        if panel.dirty {
+            let mut last = LAST_PAINT.lock().unwrap();
+            if let Some(t) = *last {
+                if t.elapsed() < Duration::from_millis(16) {
+                    throttle = true;
+                }
+            }
+            if !throttle {
+                *last = Some(Instant::now());
+            }
+        }
+        if !throttle {
+            panel.repaint(&qh);
+        }
         let _ = conn.flush();
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(8));
     }
 }
