@@ -44,9 +44,8 @@ const PADDING: u32 = 6;
 /// the first line with a ~line-height/2 top offset.
 const BOTTOM_MARGIN: u32 = 8;
 /// Niri places a top-left anchored layer surface this many pixels below the
-/// top margin (measured on this machine: margin 150 -> surface top 152 with
-/// the layer bound to an output).
-const FOLLOW_Y_OFFSET: i32 = 2;
+/// top margin (calibrated live on this machine; margin == surface top).
+const FOLLOW_Y_OFFSET: i32 = -2;
 const PAGER_W: u32 = 48;
 
 const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff]; // RGBA
