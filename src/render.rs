@@ -14,12 +14,16 @@ use cosmic_text::{
 };
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
+use smithay_client_toolkit::output::OutputData;
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::{
-    wl_output, wl_pointer::WlPointer, wl_seat::WlSeat, wl_surface::WlSurface,
+    wl_output, wl_output::WlOutput, wl_pointer::WlPointer, wl_seat::WlSeat,
+    wl_surface::WlSurface,
 };
-use smithay_client_toolkit::reexports::client::{backend::WaylandError, Connection, QueueHandle};
+use smithay_client_toolkit::reexports::client::{
+    backend::WaylandError, Connection, Proxy, QueueHandle,
+};
 use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -158,9 +162,11 @@ pub fn render_bar_pixels(
 
     if let Some(sel) = rows.iter().position(|row| row.selected) {
         if let Some(run) = text_buffer.layout_runs().nth(sel) {
-            let y = run.line_y.round() as i32;
-            let row_h = run.line_height.round() as i32;
-            for yy in y..(y + row_h) {
+            let base_y = run.line_y.round() as i32;
+            // Glyph tops sit ~0.9 * font size above line_y; measured ink top
+            // is line_y - 14 for our 15px font. Cover the full row slot.
+            let row_top = base_y - 14;
+            for yy in row_top..(row_top + LINE_HEIGHT as i32) {
                 if yy < 0 || yy as u32 >= height {
                     continue;
                 }
@@ -244,8 +250,12 @@ struct Panel {
     seat_state: SeatState,
     dbus: zbus::Connection,
     rt: tokio::runtime::Runtime,
+    compositor: CompositorState,
+    layer_shell: LayerShell,
     shm: Shm,
     layer: Option<LayerSurface>,
+    surface: Option<WlSurface>,
+    layer_output: Option<WlOutput>,
     pool: Option<SlotPool>,
     configured_size: (u32, u32),
     desired_height: u32,
@@ -260,6 +270,53 @@ struct Panel {
 }
 
 impl Panel {
+    /// (logical_position, logical_size) of an output, if known.
+    fn output_geometry(&self, output: &WlOutput) -> Option<((i32, i32), (i32, i32))> {
+        output.data::<OutputData>().and_then(|data| {
+            data.with_output_info(|info| match (info.logical_position, info.logical_size) {
+                (Some(pos), Some(size)) => Some((pos, size)),
+                _ => None,
+            })
+        })
+    }
+
+    /// The output whose logical rectangle contains the given point.
+    fn output_containing(&self, x: i32, y: i32) -> Option<WlOutput> {
+        self.output_state.outputs().find(|output| {
+            self.output_geometry(output)
+                .map(|((px, py), (pw, ph))| {
+                    x >= px && x < px + pw && y >= py && y < py + ph
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    /// (Re)create the layer surface, optionally bound to a specific output.
+    fn recreate_layer(&mut self, qh: &QueueHandle<Self>, output: Option<&WlOutput>) {
+        if let Some(surface) = self.surface.take() {
+            surface.destroy();
+        }
+        self.layer.take();
+        let surface = self.compositor.create_surface(qh);
+        let layer = self.layer_shell.create_layer_surface(
+            qh,
+            surface.clone(),
+            Layer::Overlay,
+            Some("fcitx5-niri-panel"),
+            output,
+        );
+        layer.set_exclusive_zone(0);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer.set_size(1, 1);
+        self.surface = Some(surface);
+        self.layer = Some(layer);
+        self.layer_output = output.cloned();
+        self.configured_size = (0, 0);
+        self.desired_height = 0;
+        self.desired_width = 0;
+        self.dirty = true;
+    }
+
     fn repaint(&mut self, qh: &QueueHandle<Self>) {
         let state = self.store.snapshot();
         let rows = build_rows(&state);
@@ -285,15 +342,56 @@ impl Panel {
             }
         }
 
-        // Follow the absolute spot rect (X11/XWayland path) by anchoring to
-        // the top-left with margins; otherwise center at the screen bottom.
-        let layout = if visible && state.spot_absolute && state.spot.is_some() {
-            let spot = state.spot.expect("checked");
+        // Follow the absolute spot rect (X11/XWayland path): the layer is
+        // pinned to the output containing the caret and anchored top-left
+        // with margins in that output's local coordinates. Otherwise, center
+        // at the screen bottom (no output binding).
+        // Only follow meaningful caret rectangles; fcitx also emits empty
+        // (0,0,0,0) spots that must not yank the bar around.
+        let follow = visible
+            && state.spot_absolute
+            && state
+                .spot
+                .map(|s| s.width > 0 || s.height > 0)
+                .unwrap_or(false);
+        let spot = follow.then(|| state.spot).flatten();
+        let target_output = spot.and_then(|s| self.output_containing(s.x, s.y));
+        let output = target_output.or_else(|| {
+            if follow {
+                // Keep the current binding when the spot is on an output we
+                // have no geometry for (e.g. transient spots).
+                self.layer_output.clone()
+            } else {
+                None
+            }
+        });
+        if output != self.layer_output {
+            self.recreate_layer(qh, output.as_ref());
+        }
+        let layout = if let Some(spot) = spot {
+            let (pos_x, pos_y) = output
+                .as_ref()
+                .and_then(|o| self.output_geometry(o))
+                .map(|(p, _)| p)
+                .unwrap_or((0, 0));
+            let (_, (_, out_h)) = output
+                .as_ref()
+                .and_then(|o| self.output_geometry(o))
+                .unwrap_or(((0, 0), (2560, 1440)));
+            // Place the bar below the caret when there is room; flip above
+            // the caret when typing near the bottom of the display.
+            let gap = 4i32;
+            let surface_top_below = spot.y + spot.height + gap;
+            let surface_top = if surface_top_below + desired_height as i32 <= out_h {
+                surface_top_below
+            } else {
+                (spot.y - desired_height as i32).max(0)
+            };
             (
                 Anchor::TOP | Anchor::LEFT,
                 (
-                    spot.x.max(0),
-                    (spot.y - desired_height as i32 - FOLLOW_Y_OFFSET).max(0),
+                    (spot.x - pos_x).max(0),
+                    (surface_top - pos_y - FOLLOW_Y_OFFSET).max(0),
                 ),
             )
         } else {
@@ -611,7 +709,6 @@ fn run_renderer(
         Some("fcitx5-niri-panel"),
         None,
     );
-    layer.set_anchor(Anchor::BOTTOM);
     layer.set_exclusive_zone(0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.set_size(1, 1);
@@ -622,12 +719,16 @@ fn run_renderer(
         output_state,
         seat_state,
         dbus,
+        compositor,
+        layer_shell,
         rt: tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("create renderer runtime"),
         shm,
         layer: Some(layer),
+        surface: Some(surface),
+        layer_output: None,
         pool: None,
         configured_size: (0, 0),
         desired_height: 0,
