@@ -356,15 +356,13 @@ impl Panel {
                 .unwrap_or(false);
         let spot = follow.then(|| state.spot).flatten();
         let target_output = spot.and_then(|s| self.output_containing(s.x, s.y));
-        let output = target_output.or_else(|| {
-            if follow {
-                // Keep the current binding when the spot is on an output we
-                // have no geometry for (e.g. transient spots).
-                self.layer_output.clone()
-            } else {
-                None
-            }
-        });
+        // Keep one stable layer surface: bind to the spot's output when
+        // following, otherwise keep the current binding (or the primary
+        // output at startup). Never recreate on every state flip.
+        let primary = self.output_state.outputs().next();
+        let output = target_output
+            .or_else(|| self.layer_output.clone())
+            .or(primary);
         if output != self.layer_output {
             self.recreate_layer(qh, output.as_ref());
         }
@@ -404,6 +402,12 @@ impl Panel {
             layer.set_anchor(layout.0);
             layer.set_margin(mtop, 0, 0, mleft);
             layer.commit();
+            if self.verbose {
+                eprintln!(
+                    "[render] layout anchor={:?} margins=({mleft},{mtop}) output={:?}",
+                    layout.0, self.layer_output
+                );
+            }
         }
 
         if !self.dirty {
