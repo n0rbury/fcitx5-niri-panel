@@ -43,9 +43,10 @@ const PADDING: u32 = 6;
 /// Extra margin so the last glyph row is never clipped: cosmic-text lays out
 /// the first line with a ~line-height/2 top offset.
 const BOTTOM_MARGIN: u32 = 8;
-/// Niri places a top-left anchored layer surface FOLLOW_Y_OFFSET pixels
-/// below the top margin (measured 148 -> 182, 548 -> 582 on this machine).
-const FOLLOW_Y_OFFSET: i32 = 34;
+/// Niri places a top-left anchored layer surface this many pixels below the
+/// top margin (measured on this machine: margin 150 -> surface top 152 with
+/// the layer bound to an output).
+const FOLLOW_Y_OFFSET: i32 = 2;
 const PAGER_W: u32 = 48;
 
 const BG_COLOR: [u8; 4] = [0x21, 0x21, 0x21, 0xff]; // RGBA
