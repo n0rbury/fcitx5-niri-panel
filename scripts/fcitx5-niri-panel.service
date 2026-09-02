@@ -1,6 +1,10 @@
 [Unit]
 Description=Fcitx5 Niri candidate/preedit panel
-After=default.target
+# Start with the graphical session so WAYLAND_DISPLAY (imported by niri) is
+# already in the user manager environment; starting from default.target races
+# the import and the renderer comes up with no compositor socket.
+PartOf=graphical-session.target
+After=graphical-session.target
 
 [Service]
 ExecStart=%h/.local/bin/fcitx5-niri-panel
@@ -8,4 +12,4 @@ Restart=on-failure
 RestartSec=3
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

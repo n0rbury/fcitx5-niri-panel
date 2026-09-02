@@ -15,6 +15,9 @@ mkdir -p "$HOME/.config/systemd/user"
 install -Dm644 "$repo_root/scripts/fcitx5-niri-panel.service" "$HOME/.config/systemd/user/fcitx5-niri-panel.service"
 
 systemctl --user daemon-reload
+# Disable first: if the unit previously lived under default.target, a stale
+# wants-symlink would start it before graphical-session.target exists.
+systemctl --user disable fcitx5-niri-panel.service >/dev/null 2>&1 || true
 systemctl --user enable --now fcitx5-niri-panel.service
 systemctl --user restart fcitx5-niri-panel.service || true
 
