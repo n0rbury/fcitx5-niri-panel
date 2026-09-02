@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -8,14 +8,14 @@ pub struct Rect {
     pub height: i32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Candidate {
     pub label: String,
     pub text: String,
     pub attr: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CandidateLayout {
     NotSet = 0,
     Vertical = 1,
@@ -29,7 +29,7 @@ impl Default for CandidateLayout {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PanelState {
     pub visible: bool,
     pub preedit: String,
@@ -114,13 +114,17 @@ impl PanelState {
         self.selected = selected;
         self.has_previous = has_previous;
         self.has_next = has_next;
-        self.layout = match layout {
-            1 => CandidateLayout::Vertical,
-            2 => CandidateLayout::Horizontal,
-            3 => CandidateLayout::Table,
-            _ => CandidateLayout::NotSet,
-        };
+        self.layout = candidate_layout_from(layout);
         self.recompute_visible();
         Ok(())
+    }
+}
+
+fn candidate_layout_from(hint: i32) -> CandidateLayout {
+    match hint {
+        1 => CandidateLayout::Vertical,
+        2 => CandidateLayout::Horizontal,
+        3 => CandidateLayout::Table,
+        _ => CandidateLayout::NotSet,
     }
 }

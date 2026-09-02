@@ -51,5 +51,22 @@ table. The panel normalizes this by splitting the aux-down row into
 `PanelState::aux_down`, shifting `selected` down by one, and keeping only real
 candidates in `candidates`.
 
-The daemon prints every relevant inbound method. This is intentional for the
-prototype so protocol behavior can be compared directly with `busctl monitor`.
+## Why there is no client-side channel
+
+Fcitx also emits a per-IC `UpdateClientSideUI` signal
+(`org.fcitx.Fcitx.InputContext1`, signature `a(si)ia(si)a(si)a(ss)iibb`) when
+an input context keeps the `ClientSideInputPanel` capability. On-machine
+evaluation (D-Bus monitor, fcitx5 5.1.19) showed this signal is sent **unicast
+to the input-method client — the application's own bus connection** — so no
+third-party panel can observe it with a match rule; the application is the
+intended renderer. Panel-side rendering for those apps is instead achieved by
+disabling the capability in fcitx: with the current UI set to kimpanel and
+`XDG_CURRENT_DESKTOP` containing `GNOME`, fcitx's `useClientSideUI()` strips
+`ClientSideInputPanel` from Wayland input contexts
+(`dbusfrontend.cpp updateCapability`), and all candidate data flows through
+the Kimpanel channel above. This project applies that via the
+`app-org.fcitx.Fcitx5@autostart.service.d/override.conf` drop-in.
+
+The daemon prints every relevant inbound method and signal. This is
+intentional for the prototype so protocol behavior can be compared directly
+with `busctl monitor`.

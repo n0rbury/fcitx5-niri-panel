@@ -54,14 +54,6 @@ impl StateStore {
         }
     }
 
-    /// Start tracking the focused window's output via the niri IPC socket;
-    /// focus changes notify the renderer through the shared channel. Returns
-    /// None when no niri socket is reachable (e.g. headless mode).
-    pub fn track_niri_focus(&self) -> Option<std::sync::Arc<crate::niri::NiriFocus>> {
-        let tx = self.notify.clone()?;
-        crate::niri::spawn(tx)
-    }
-
     pub fn snapshot(&self) -> PanelState {
         self.inner.read().expect("state lock poisoned").clone()
     }
@@ -171,6 +163,12 @@ impl StateStore {
 
 /// Subscribe to the fcitx5 kimpanel addon state signals (/kimpanel,
 /// org.kde.kimpanel.inputmethod) and feed them into the shared store.
+///
+/// Fcitx's other panel-data path — the per-IC `UpdateClientSideUI` signal —
+/// is sent unicast to the input-method client (the app) and cannot be
+/// observed by a panel; panel-side rendering for those apps is achieved by
+/// disabling the client-side capability in fcitx instead (see
+/// app-org.fcitx.Fcitx5@autostart.service.d/override.conf).
 ///
 /// Uses a dedicated connection so the match-rule stream never interferes with
 /// the org.kde.impanel object server on the main connection.

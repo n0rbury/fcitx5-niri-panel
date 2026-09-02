@@ -6,13 +6,14 @@
 //! candidates (one joined horizontal row by default, stacked rows for the
 //! vertical layout), highlighting the selected candidate. When the state
 //! carries an absolute spot rectangle the bar pins to that output and sits
-//! just below the caret (flipping above it near the screen bottom). Without
-//! one (Wayland-native clients, whose rects are window-relative) the bar
-//! anchors to the bottom of the output holding the focused window, tracked
-//! via the niri IPC event stream (crate::niri).
+//! just below the caret, flipping above it near the screen bottom. Without
+//! one (Wayland-native clients, whose rects are window-relative) the layer
+//! surface is recreated without an output binding at each hidden -> visible
+//! transition, so the compositor maps it to its then-active output (niri
+//! assigns output-less layer surfaces to the active output) and the bar
+//! anchors to the bottom of the monitor the user is typing on.
 
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cosmic_text::{
@@ -42,7 +43,6 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
 use crate::kimpanel::StateStore;
 use crate::model::{CandidateLayout, PanelState};
-use crate::niri::NiriFocus;
 
 const LINE_HEIGHT: u32 = 22;
 /// Horizontal inset. Zero: text and the full-row highlight run flush to the
@@ -425,8 +425,9 @@ struct Panel {
     layer: Option<LayerSurface>,
     surface: Option<WlSurface>,
     layer_output: Option<WlOutput>,
-    /// Focused window's output, tracked via the niri IPC socket.
-    focus: Option<Arc<NiriFocus>>,
+    /// Visibility of the previous repaint, for detecting hidden -> visible
+    /// transitions (fallback sessions re-anchor via an unbound surface).
+    was_visible: bool,
     pool: Option<SlotPool>,
     configured_size: (u32, u32),
     desired_height: u32,
@@ -462,19 +463,11 @@ impl Panel {
         })
     }
 
-    /// Compositor-advertised output name (e.g. "DP-1"), for matching against
-    /// niri IPC names.
+    /// Compositor-advertised output name (e.g. "DP-1"), for logging.
     fn output_name(&self, output: &WlOutput) -> Option<String> {
         output
             .data::<OutputData>()
             .and_then(|data| data.with_output_info(|info| info.name.clone()))
-    }
-
-    /// The wl_output whose name matches the given niri output name.
-    fn find_output(&self, name: &str) -> Option<WlOutput> {
-        self.output_state
-            .outputs()
-            .find(|output| self.output_name(output).as_deref() == Some(name))
     }
 
     /// (Re)create the layer surface, optionally bound to a specific output.
@@ -516,6 +509,42 @@ impl Panel {
         };
         let desired_width = estimate_bar_width(&state, &mut self.font_system).max(1);
 
+        // Follow the absolute spot rect (X11/XWayland path): the layer is
+        // pinned to the output containing the caret and anchored top-left
+        // with margins in that output's local coordinates. Only follow
+        // meaningful caret rectangles; fcitx also emits empty (0,0,0,0)
+        // spots that must not yank the bar around.
+        let follow = visible
+            && state.spot_absolute
+            && state
+                .spot
+                .map(|s| s.width > 0 || s.height > 0)
+                .unwrap_or(false);
+        let spot = follow.then(|| state.spot).flatten();
+        let target_output = spot.and_then(|s| self.output_containing(s.x, s.y));
+        // Absolute carets bind the layer to the caret's output. Relative-rect
+        // sessions (Wayland-native clients) cannot be mapped to a global
+        // position, so at each hidden -> visible transition the surface is
+        // recreated without an output binding: the compositor then maps it to
+        // its then-active output (niri assigns output-less layer surfaces to
+        // the active output), keeping the bottom-anchored bar on the monitor
+        // the user is typing on with no compositor-specific IPC.
+        let recreate = match &target_output {
+            Some(target) => self.layer_output.as_ref() != Some(target),
+            None => visible && !self.was_visible,
+        };
+        self.was_visible = visible;
+        if recreate {
+            if self.verbose {
+                let name = target_output
+                    .as_ref()
+                    .and_then(|o| self.output_name(o))
+                    .unwrap_or_else(|| "<active>".into());
+                eprintln!("[render] layer output -> {name}");
+            }
+            self.recreate_layer(qh, target_output.as_ref());
+        }
+
         let Some(layer) = self.layer.clone() else { return };
         if desired_height != self.desired_height || desired_width != self.desired_width {
             self.desired_height = desired_height;
@@ -530,52 +559,13 @@ impl Panel {
             }
         }
 
-        // Follow the absolute spot rect (X11/XWayland path): the layer is
-        // pinned to the output containing the caret and anchored top-left
-        // with margins in that output's local coordinates. Otherwise, center
-        // at the screen bottom (no output binding).
-        // Only follow meaningful caret rectangles; fcitx also emits empty
-        // (0,0,0,0) spots that must not yank the bar around.
-        let follow = visible
-            && state.spot_absolute
-            && state
-                .spot
-                .map(|s| s.width > 0 || s.height > 0)
-                .unwrap_or(false);
-        let spot = follow.then(|| state.spot).flatten();
-        let target_output = spot.and_then(|s| self.output_containing(s.x, s.y));
-        // Without an absolute spot (Wayland-native clients), anchor to the
-        // output of the focused window, so the bar shows on the display the
-        // user is typing on. Niri's IPC exposes no positions for tiled
-        // windows, so output-level anchoring is the ceiling there. Keep one
-        // stable layer surface otherwise; never recreate on every state flip.
-        let focus_output = self
-            .focus
-            .as_ref()
-            .and_then(|focus| focus.output())
-            .and_then(|name| self.find_output(&name));
-        let primary = self.output_state.outputs().next();
-        let output = target_output
-            .or(focus_output)
-            .or_else(|| self.layer_output.clone())
-            .or(primary);
-        if output != self.layer_output {
-            if self.verbose {
-                let name = output
-                    .as_ref()
-                    .and_then(|o| self.output_name(o))
-                    .unwrap_or_else(|| "?".into());
-                eprintln!("[render] layer output -> {name}");
-            }
-            self.recreate_layer(qh, output.as_ref());
-        }
         let layout = if let Some(spot) = spot {
-            let (pos_x, pos_y) = output
+            let (pos_x, pos_y) = target_output
                 .as_ref()
                 .and_then(|o| self.output_geometry(o))
                 .map(|(p, _)| p)
                 .unwrap_or((0, 0));
-            let (_, (_, out_h)) = output
+            let (_, (_, out_h)) = target_output
                 .as_ref()
                 .and_then(|o| self.output_geometry(o))
                 .unwrap_or(((0, 0), (2560, 1440)));
@@ -918,11 +908,6 @@ fn run_renderer(
     layer.set_size(1, 1);
     layer.commit();
 
-    let focus = store.track_niri_focus();
-    if verbose && focus.is_none() {
-        eprintln!("[render] niri focus tracking unavailable (no niri socket)");
-    }
-
     let mut panel = Panel {
         registry_state,
         output_state,
@@ -938,7 +923,7 @@ fn run_renderer(
         layer: Some(layer),
         surface: Some(surface),
         layer_output: None,
-        focus,
+        was_visible: false,
         pool: None,
         configured_size: (0, 0),
         desired_height: 0,

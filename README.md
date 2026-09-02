@@ -19,13 +19,13 @@ The bar follows the caret for input contexts that report an absolute spot
 rectangle (the X11/XWayland path, e.g. Feishu): it pins to the caret's output
 and sits just below the caret, flipping above it when typing near the bottom
 of the display. Wayland-native clients only report window-relative cursor
-rects — and Fcitx's D-Bus frontend does not flag them as relative — while
-niri's IPC exposes no global positions for tiled windows, so caret-accurate
-placement is not reachable there; instead the bar anchors to the bottom of
-the output holding the focused window, tracked live over the niri IPC event
-stream. Multi-page candidate lists have no on-panel paging UI yet: the
-`LookupTablePageUp`/`Down` signals are implemented, but nothing on the bar
-invokes them.
+rects, which cannot be mapped to a global position, so for those the bar
+anchors to the bottom of the compositor's active output instead: at each
+hidden -> visible transition the layer surface is recreated without an output
+binding, and niri maps output-less layer surfaces to its then-active output —
+no compositor-specific IPC involved. Multi-page candidate lists have no
+on-panel paging UI yet: the `LookupTablePageUp`/`Down` signals are
+implemented, but nothing on the bar invokes them.
 
 The long-term design is:
 
@@ -41,18 +41,26 @@ fcitx5-niri-panel
    +-----+------+
          |
   Wayland popup / layer-shell
-         |
-        Niri
+      |
+     Niri
 ```
 
-The protocol is verified end-to-end: Fcitx routes candidate tables to this
-panel via `SetLookupTable` for every input context — X11/XWayland apps such
-as Feishu, GTK/Qt apps, and synthetic D-Bus contexts unconditionally, and
-Wayland-native portal clients (e.g. Ghostty, Chromium-class apps) once Fcitx
-is started with `XDG_CURRENT_DESKTOP=GNOME:niri`. Fcitx's D-Bus frontend
-only strips the client-side UI capability from Wayland input contexts on
-GNOME-type desktops (`useClientSideUI`), and the `gnome` component of that
-variable makes it do so under Niri.
+Rendering follows the GNOME Kimpanel extension's design principle: use the
+desktop shell's own toolkit and popup-menu styling for the IME UI, keeping
+the panel's own styling minimal — port Fcitx's visual theme, and Fcitx's
+classic candidate window remains the fallback for native Wayland clients
+whose popup Niri already anchors and renders.
+
+The panel consumes the Kimpanel channel only. GTK/Qt and sandboxed
+(portal) Wayland apps ship Fcitx IM modules that can draw candidates
+themselves (`ClientSideInputPanel`); on-machine evaluation showed Fcitx sends
+their UI state unicast to the app itself, so a panel cannot observe it. To
+render those apps through this panel instead, Fcitx is configured to strip
+that capability — `XDG_CURRENT_DESKTOP=GNOME:niri` on the Fcitx5 autostart
+unit (fcitx5's supported `useClientSideUI` mechanism; see the
+`app-org.fcitx.Fcitx5@autostart.service.d/override.conf` drop-in). With it,
+every input context feeds the Kimpanel channel and the bar is the single
+candidate UI across Wayland and XWayland.
 
 `cargo run -- --headless` runs the panel without the Wayland bar (e.g. over
 SSH). `cargo run --bin icdriver -- --text=nihao` drives a synthetic input
