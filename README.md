@@ -5,18 +5,23 @@ A standalone Fcitx 5 Kimpanel-compatible candidate/preedit panel for Niri.
 ## Current stage
 
 The panel implements the **panel side** of the KDE Kimpanel D-Bus protocol and
-renders the input state as a bottom-anchored wlr-layer-shell bar on Niri.
-Fcitx 5's Kimpanel UI addon sends panel updates (preedit, aux, candidates,
-cursor rect) which are both logged and painted: candidates appear in a dark
-bar at the bottom of the screen while composing, with the selected row
-highlighted, and the bar hides again when input is committed or focus leaves.
-Clicking a candidate row selects it: the panel emits the Kimpanel
+renders the input state as an opaque, content-sized wlr-layer-shell bar on
+Niri. Fcitx 5's Kimpanel UI addon sends panel updates (preedit, aux,
+candidates, cursor rect) which are both logged and painted: while composing,
+the bar shows the preedit line above the candidates — by default a single
+horizontal row joining every candidate (Fcitx may also request the vertical
+layout, rendered as stacked rows) — with a full-row-height highlight on the
+selected candidate, and the bar hides again when input is committed or focus
+leaves. Clicking a candidate selects it: the panel emits the Kimpanel
 `SelectCandidate` signal, which Fcitx answers by committing the candidate.
-When the candidate list has more than one page (Rime's `has_next`), paging
-arrows appear on the right edge of the bar; clicking them pages through the
-list via the `LookupTablePageUp`/Down signals. The bar is opaque,
-content-sized, and follows the caret for input contexts that report an
-absolute spot rectangle (the X11/XWayland path, e.g. Feishu).
+
+The bar follows the caret: for input contexts that report an absolute spot
+rectangle (the X11/XWayland path, e.g. Feishu), it pins to the caret's output
+and sits just below the caret, flipping above it when typing near the bottom
+of the display; without a spot rectangle it falls back to a centered bar at
+the bottom of the screen. Multi-page candidate lists have no on-panel paging
+UI yet: the `LookupTablePageUp`/`Down` signals are implemented, but nothing
+on the bar invokes them.
 
 The long-term design is:
 

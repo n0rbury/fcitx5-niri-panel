@@ -1,10 +1,13 @@
 //! Layer-shell candidate bar renderer.
 //!
 //! Runs on a dedicated thread with its own Wayland connection. It watches the
-//! shared panel state through a notification channel and paints a bottom
-//! anchored wlr-layer-shell bar with preedit/aux/candidate rows, highlighting
-//! the selected candidate. Niri anchors layer surfaces to screen edges, so the
-//! bar does not follow the caret; it appears whenever input state is visible.
+//! shared panel state through a notification channel and paints an opaque,
+//! content-sized wlr-layer-shell bar with the preedit/aux line above the
+//! candidates (one joined horizontal row by default, stacked rows for the
+//! vertical layout), highlighting the selected candidate. When the state
+//! carries an absolute spot rectangle the bar pins to that output and sits
+//! just below the caret (flipping above it near the screen bottom); without
+//! one it falls back to a centered bar at the bottom of the screen.
 
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
