@@ -54,6 +54,14 @@ impl StateStore {
         }
     }
 
+    /// Start tracking the focused window's output via the niri IPC socket;
+    /// focus changes notify the renderer through the shared channel. Returns
+    /// None when no niri socket is reachable (e.g. headless mode).
+    pub fn track_niri_focus(&self) -> Option<std::sync::Arc<crate::niri::NiriFocus>> {
+        let tx = self.notify.clone()?;
+        crate::niri::spawn(tx)
+    }
+
     pub fn snapshot(&self) -> PanelState {
         self.inner.read().expect("state lock poisoned").clone()
     }

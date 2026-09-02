@@ -15,13 +15,17 @@ selected candidate, and the bar hides again when input is committed or focus
 leaves. Clicking a candidate selects it: the panel emits the Kimpanel
 `SelectCandidate` signal, which Fcitx answers by committing the candidate.
 
-The bar follows the caret: for input contexts that report an absolute spot
-rectangle (the X11/XWayland path, e.g. Feishu), it pins to the caret's output
+The bar follows the caret for input contexts that report an absolute spot
+rectangle (the X11/XWayland path, e.g. Feishu): it pins to the caret's output
 and sits just below the caret, flipping above it when typing near the bottom
-of the display; without a spot rectangle it falls back to a centered bar at
-the bottom of the screen. Multi-page candidate lists have no on-panel paging
-UI yet: the `LookupTablePageUp`/`Down` signals are implemented, but nothing
-on the bar invokes them.
+of the display. Wayland-native clients only report window-relative cursor
+rects — and Fcitx's D-Bus frontend does not flag them as relative — while
+niri's IPC exposes no global positions for tiled windows, so caret-accurate
+placement is not reachable there; instead the bar anchors to the bottom of
+the output holding the focused window, tracked live over the niri IPC event
+stream. Multi-page candidate lists have no on-panel paging UI yet: the
+`LookupTablePageUp`/`Down` signals are implemented, but nothing on the bar
+invokes them.
 
 The long-term design is:
 
@@ -41,11 +45,14 @@ fcitx5-niri-panel
         Niri
 ```
 
-The protocol is verified end-to-end: for input contexts without the
-`ClientSideInputPanel` capability (X11/XWayland apps such as Feishu, GTK/Qt
-apps, synthetic D-Bus contexts), Fcitx routes candidate tables to this panel
-via `SetLookupTable`. Wayland-native portal clients (e.g. Ghostty,
-Chromium-class apps) keep the client-side UI path and do not reach the panel.
+The protocol is verified end-to-end: Fcitx routes candidate tables to this
+panel via `SetLookupTable` for every input context — X11/XWayland apps such
+as Feishu, GTK/Qt apps, and synthetic D-Bus contexts unconditionally, and
+Wayland-native portal clients (e.g. Ghostty, Chromium-class apps) once Fcitx
+is started with `XDG_CURRENT_DESKTOP=GNOME:niri`. Fcitx's D-Bus frontend
+only strips the client-side UI capability from Wayland input contexts on
+GNOME-type desktops (`useClientSideUI`), and the `gnome` component of that
+variable makes it do so under Niri.
 
 `cargo run -- --headless` runs the panel without the Wayland bar (e.g. over
 SSH). `cargo run --bin icdriver -- --text=nihao` drives a synthetic input

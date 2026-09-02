@@ -2,7 +2,9 @@
 //!
 //! Verifies Kimpanel routing without a GUI: with ClientSideInputPanel (bit 39)
 //! unset, input-panel updates must reach org.kde.impanel (SetLookupTable);
-//! with the bit set, updates go to UpdateClientSideUI.
+//! with the bit set, updates go to UpdateClientSideUI. `--cursor=x,y` reports
+//! a window-relative cursor rect via SetCursorRect, the way real portal
+//! clients do, to exercise the kimpanel spot-rect path.
 
 use std::time::Duration;
 use zbus::proxy;
@@ -34,6 +36,8 @@ trait InputContext1 {
     ) -> zbus::Result<bool>;
     #[zbus(name = "DestroyIC")]
     fn destroy_ic(&self) -> zbus::Result<()>;
+    #[zbus(name = "SetCursorRect")]
+    fn set_cursor_rect(&self, x: i32, y: i32, w: i32, h: i32) -> zbus::Result<()>;
 }
 
 #[tokio::main]
@@ -52,6 +56,13 @@ async fn main() -> zbus::Result<()> {
         .find_map(|a| a.strip_prefix("--hold="))
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
+    // Window-relative cursor rect to report after focus-in, like a real
+    // portal client would.
+    let cursor: Option<(i32, i32)> = args.iter().find_map(|a| {
+        let v = a.strip_prefix("--cursor=")?;
+        let (x, y) = v.split_once(',')?;
+        Some((x.parse().ok()?, y.parse().ok()?))
+    });
 
     let conn = zbus::Connection::session().await?;
     let im = InputMethod1Proxy::new(&conn).await?;
@@ -70,6 +81,10 @@ async fn main() -> zbus::Result<()> {
     ic.set_capability(cap).await?;
     println!("capability 0x{cap:x}");
     ic.focus_in().await?;
+    if let Some((x, y)) = cursor {
+        ic.set_cursor_rect(x, y, 0, 24).await?;
+        println!("cursor rect {x},{y}");
+    }
     std::thread::sleep(Duration::from_millis(500));
 
     for ch in text.chars() {
