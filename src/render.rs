@@ -42,7 +42,7 @@ use smithay_client_toolkit::shm::slot::SlotPool;
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
 use crate::kimpanel::StateStore;
-use crate::model::{CandidateLayout, PanelState};
+use crate::model::{CandidateLayout, PanelState, Rect};
 
 const LINE_HEIGHT: u32 = 22;
 /// Horizontal inset. Zero: text and the full-row highlight run flush to the
@@ -484,9 +484,20 @@ impl Panel {
             Some("fcitx5-niri-panel"),
             output,
         );
-        layer.set_exclusive_zone(0);
+        // -1: the bar is a caret-anchored transient. Exclusive zones from
+        // shell bars must not push it around — with the default 0, niri
+        // offsets every TOP-anchored placement by the shell bar's reserved
+        // height and all positioning math silently shifts.
+        layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_size(1, 1);
+        // A fresh layer surface has no anchors, which the compositor renders
+        // centered. Pin it to the bottom now and mirror that in self.layout;
+        // otherwise a repaint whose computed layout happens to equal the
+        // stale self.layout skips set_anchor and the bar shows up centered.
+        layer.set_anchor(Anchor::BOTTOM);
+        layer.set_margin(0, 0, 0, 0);
+        self.layout = (Anchor::BOTTOM, (0, 0));
         self.surface = Some(surface);
         self.layer = Some(layer);
         self.layer_output = output.cloned();
@@ -497,9 +508,68 @@ impl Panel {
     }
 
     fn repaint(&mut self, qh: &QueueHandle<Self>) {
-        let state = self.store.snapshot();
+        let mut state = self.store.snapshot();
         let rows = build_rows(&state);
         let visible = state.visible && !rows.is_empty();
+
+        // Tier 2: resolve window-relative spots into output-relative global
+        // ones via the niri IPC (the compositor's shell-data channel — the
+        // role mutter plays for the GNOME kimpanel extension). GTK/Qt clients
+        // report the caret relative to their toplevel surface; only the
+        // compositor knows where that toplevel is. When the resolution fails
+        // (other compositor, no focused window, niri without tile positions
+        // in the IPC) the rect stays relative and the bottom-anchor fallback
+        // below applies.
+        if visible && !state.spot_absolute {
+            if let (Some(spot), Some(scale)) = (state.spot, state.scale) {
+                if spot.width > 0 || spot.height > 0 {
+                    if let Some(win) = crate::niri::focused_window() {
+                        // The window's output comes from the same IPC
+                        // resolution (workspace -> output name). A containment
+                        // test against output-local coordinates cannot
+                        // disambiguate outputs and put the bar on the wrong
+                        // display whenever the point fits more than one
+                        // output's local size.
+                        let rel = win.absolute_spot(spot, scale);
+                        let focused = self
+                            .output_state
+                            .outputs()
+                            .find(|output| {
+                                self.output_name(output).as_deref() == Some(&win.output)
+                            })
+                            .and_then(|o| self.output_geometry(&o).map(|(pos, _)| pos));
+                        if let Some((ox, oy)) = focused {
+                            if self.verbose {
+                                eprintln!(
+                                    "[render] niri spot: output={} tile={:?} offset={:?} \
+                                     rect=({},{},{},{}) scale={scale} -> \
+                                     rel=({},{}) global=({},{})",
+                                    win.output,
+                                    win.tile_pos,
+                                    win.offset_in_tile,
+                                    spot.x,
+                                    spot.y,
+                                    spot.width,
+                                    spot.height,
+                                    rel.x,
+                                    rel.y,
+                                    rel.x + ox,
+                                    rel.y + oy,
+                                );
+                            }
+                            state.spot = Some(Rect {
+                                x: rel.x + ox,
+                                y: rel.y + oy,
+                                width: rel.width,
+                                height: rel.height,
+                            });
+                            state.spot_absolute = true;
+                        }
+                    }
+                }
+            }
+        }
+
         let desired_height = if visible {
             // One exact 22px slot per row; the highlight fills the whole
             // selected slot so no background bands are possible.
@@ -570,13 +640,17 @@ impl Panel {
                 .and_then(|o| self.output_geometry(o))
                 .unwrap_or(((0, 0), (2560, 1440)));
             // Place the bar below the caret when there is room; flip above
-            // the caret when typing near the bottom of the display.
+            // the caret when typing near the bottom of the display. spot is
+            // in global coordinates while out_h is output-local, so compare
+            // in the output's frame; the flip must also leave the same gap
+            // between the bar's bottom edge and the caret.
             let gap = 4i32;
-            let surface_top_below = spot.y + spot.height + gap;
-            let surface_top = if surface_top_below + desired_height as i32 <= out_h {
-                surface_top_below
+            let below_top = spot.y + spot.height + gap;
+            let fits_below = below_top - pos_y + desired_height as i32 <= out_h;
+            let surface_top = if fits_below {
+                below_top
             } else {
-                (spot.y - desired_height as i32).max(0)
+                (spot.y - gap - desired_height as i32).max(0)
             };
             (
                 Anchor::TOP | Anchor::LEFT,
@@ -903,8 +977,16 @@ fn run_renderer(
         Some("fcitx5-niri-panel"),
         None,
     );
-    layer.set_exclusive_zone(0);
+    // -1: same reason as in recreate_layer — a caret-anchored transient
+    // must ignore shell bars' exclusive zones.
+    layer.set_exclusive_zone(-1);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    // Match the physical state to the struct's initial self.layout
+    // ((BOTTOM, (0, 0))): a fresh surface with no anchors renders centered,
+    // and a first show whose computed layout equals the initial value would
+    // otherwise skip set_anchor entirely.
+    layer.set_anchor(Anchor::BOTTOM);
+    layer.set_margin(0, 0, 0, 0);
     layer.set_size(1, 1);
     layer.commit();
 

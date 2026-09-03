@@ -15,15 +15,26 @@ selected candidate, and the bar hides again when input is committed or focus
 leaves. Clicking a candidate selects it: the panel emits the Kimpanel
 `SelectCandidate` signal, which Fcitx answers by committing the candidate.
 
-The bar follows the caret for input contexts that report an absolute spot
-rectangle (the X11/XWayland path, e.g. Feishu): it pins to the caret's output
-and sits just below the caret, flipping above it when typing near the bottom
-of the display. Wayland-native clients only report window-relative cursor
-rects, which cannot be mapped to a global position, so for those the bar
-anchors to the bottom of the compositor's active output instead: at each
-hidden -> visible transition the layer surface is recreated without an output
-binding, and niri maps output-less layer surfaces to its then-active output —
-no compositor-specific IPC involved. Multi-page candidate lists have no
+The bar follows the caret. XWayland/XIM clients (e.g. Feishu) report an
+absolute spot rectangle: the bar pins to the caret's output and sits just
+below the caret, flipping above it near the bottom of the display.
+Wayland-native clients only report window-relative cursor rects, so the
+panel resolves them to global positions with the focused window's position
+from the niri IPC (`niri msg -j focused-window` + `workspaces` for its
+output) — the same relative-rect +
+shell-known-window-position scheme as the GNOME Kimpanel extension. Stock
+niri omits tile positions for tiled windows over IPC; the local niri build
+adds them (see `niri-patch/`, deployed at `~/.local/bin/niri` via a
+`niri.service.d` drop-in). GTK4 IM modules also report caret rects in
+surface-buffer coordinates — one CSD shadow margin below the caret; the
+local `fcitx5-frontend-gtk4` build carries the one-block fix in
+`fcitx5-gtk-patch/` (content-relative rects on Wayland). Without a
+resolvable rect (other compositors,
+Electron-style clients that never report a caret to fcitx), the bar falls
+back to the bottom of the compositor's active output: at each
+hidden -> visible transition the layer surface is recreated without an
+output binding, and niri maps output-less layer surfaces to its
+then-active output. Multi-page candidate lists have no
 on-panel paging UI yet: the `LookupTablePageUp`/`Down` signals are
 implemented, but nothing on the bar invokes them.
 
@@ -51,7 +62,8 @@ the panel's own styling minimal — port Fcitx's visual theme, and Fcitx's
 classic candidate window remains the fallback for native Wayland clients
 whose popup Niri already anchors and renders.
 
-The panel consumes the Kimpanel channel only. GTK/Qt and sandboxed
+The panel consumes the Kimpanel channel plus one cached niri IPC resolution
+(the focused window's position and output; see above). GTK/Qt and sandboxed
 (portal) Wayland apps ship Fcitx IM modules that can draw candidates
 themselves (`ClientSideInputPanel`); on-machine evaluation showed Fcitx sends
 their UI state unicast to the app itself, so a panel cannot observe it. To

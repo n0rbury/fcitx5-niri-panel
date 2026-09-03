@@ -32,12 +32,22 @@ fcitx5-niri-panel = PanelState -> themed Wayland renderer (layer shell)
    cannot serve XIM apps. Do not treat protocol differences between frontends
    as architecture; they are implementation details.
 
-2. **Native Wayland positioning is not our problem.** Niri + Smithay already
-   position `zwp_input_popup_surface_v2` popups for Fcitx's own ClassicUI.
-   Our fallback for input contexts without an absolute caret rect is the
-   per-session re-anchor: recreate the layer surface without an output
-   binding at each hidden -> visible transition, and Niri maps it to its
-   then-active output. No compositor IPC.
+2. **Positioning mirrors the GNOME kimpanel extension: relative rect +
+   shell-known window position.** GTK/Qt clients report the caret relative
+   to their toplevel surface; only the compositor knows where that toplevel
+   is. The panel resolves `SetRelativeSpotRectV2` rects to global ones with
+   the focused window's position from the niri IPC (`src/niri.rs`, one
+   cached resolution: `niri msg -j focused-window` + `niri msg -j
+   workspaces` for the window's output name) — the niri equivalent of
+   mutter's `focus_window` that the GNOME extension reads in-process. Stock
+   niri omits tile positions for tiled windows; the local niri build carries
+   `niri-patch/0001-ipc-fill-tile_pos_in_workspace_view-for-tiled-windows.patch`
+   (deployed at `~/.local/bin/niri` via a `niri.service.d` drop-in, taking
+   effect at next login). Fallback tiers stay: absolute `SetSpotRect` (XIM)
+   pins to the caret's output; without any resolvable rect the layer surface
+   is recreated without an output binding at each hidden -> visible
+   transition and niri maps it to its then-active output (bottom-anchor).
+   No compositor coupling beyond this one IPC resolution.
 
 3. **Code is a liability.** Before adding a component, ask which
    user-visible behavior it enables and what would break without it. Delete
@@ -70,7 +80,8 @@ fcitx5-niri-panel = PanelState -> themed Wayland renderer (layer shell)
 
 ## Non-goals
 
-- Compositor-specific IPC (Niri or otherwise).
+- Compositor coupling beyond the single `niri msg` window-position query
+  (no event-stream state, no second IPC consumer, no other compositor).
 - A second rendering path or theming engine.
 - Observing or emulating the client-side UI channel.
 - Implementing `xx-*` Wayland protocols.
@@ -87,8 +98,7 @@ cargo clippy --all-targets                   # must stay clean
 Headless smoke test (no Niri needed):
 
 ```bash
-./scripts/smoke.sh                           # private bus + SetLookupTable feed
-# or manually: dbus-run-session + busctl call into org.kde.impanel
+./scripts/check-kimpanel.sh                  # bus ownership + introspection
 ```
 
 On the machine (fury17):
