@@ -1,0 +1,45 @@
+--- a/gtk3/fcitximcontext.cpp	2026-03-17 23:20:38.000000000 +0800
++++ b/gtk3/fcitximcontext.cpp	2026-09-03 16:43:51.494865595 +0800
+@@ -966,6 +966,9 @@
+         gdouble px, py;
+         GdkWindow *parent;
+         GdkWindow *window = fcitxcontext->client_window;
++        GtkWidget *client_widget = NULL;
++
++        gdk_window_get_user_data(window, (gpointer *)&client_widget);
+ 
+         while ((parent = gdk_window_get_effective_parent(window)) != NULL) {
+             gdk_window_coords_to_parent(window, area.x, area.y, &px, &py);
+@@ -973,6 +976,32 @@
+             area.y = py;
+             window = parent;
+         }
++
++        // The parent walk above yields coordinates relative to the toplevel
++        // GdkWindow, whose origin is the client's buffer origin — CSD shadow
++        // margins included (the window decoration's shadow, or margins the
++        // app declared via gdk_window_set_shadow_width). Kimpanel consumers
++        // anchor the rect to the window content origin (the compositor's
++        // tile/frame position), which excludes those margins, so convert to
++        // content coordinates: the titlebar widget if the window has one,
++        // otherwise the bin child — both are placed at the content origin
++        // (and at (0,0) whenever the margin is gone, e.g. maximized).
++        if (client_widget != NULL) {
++            GtkWidget *holder = gtk_widget_get_toplevel(client_widget);
++            if (holder != NULL && GTK_IS_WINDOW(holder)) {
++                GtkWidget *origin = gtk_window_get_titlebar(GTK_WINDOW(holder));
++                if (origin == NULL) {
++                    origin = gtk_bin_get_child(GTK_BIN(holder));
++                }
++                gint ox = 0, oy = 0;
++                if (origin != NULL && gtk_widget_get_mapped(origin) &&
++                    gtk_widget_translate_coordinates(origin, holder, 0, 0,
++                                                     &ox, &oy)) {
++                    area.x -= ox;
++                    area.y -= oy;
++                }
++            }
++        }
+     } else
+ #endif
+     {
