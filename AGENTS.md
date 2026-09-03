@@ -17,7 +17,11 @@ fcitx wiki's Wayland environment (no `GTK_IM_MODULE`/`QT_IM_MODULE`,
 `XMODIFIERS=@im=fcitx`) plus the Noctalia theme (`fcitx5-theme/`) for
 consistent styling. Keep the principles below as the historical design
 record; the patches under `niri-patch/`, `fcitx5-gtk-patch/`,
-`fcitx5-patch/` remain individually upstreamable.
+`fcitx5-patch/` remain individually upstreamable. The reference machine
+runs stock packages as of 2026-09 (the patched files were reverted from
+their `.orig` backups once the panel retired; the niri.service.d drop-in
+was removed, so stock niri starts at next login — `~/.local/bin/niri` and
+the `.orig`-style rebuilds in the patch READMEs cover the patched setup).
 
 ## What this is
 
