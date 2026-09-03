@@ -2,6 +2,23 @@
 
 Guidance for working on this repository.
 
+## Status (2026-09): panel retired, theme pivot
+
+The panel lost its architectural bet and is retired from active use. The
+kimpanel relay is "correct by coordination": coordinates leave the app and
+are re-anchored by a third party that must reconstruct global position from
+partial data — every toolkit's CSD/shadow quirk becomes a relay bug
+(GTK4 surface coords, GTK3 same, Firefox declared shadows which are
+GDK-private and unreachable). The native paths are "correct by
+construction": text-input-v3 apps get fcitx5's ClassicUI popup anchored by
+niri's input-method-v2 support; XIM apps get the themed xcb popup; the
+fcitx im modules' in-client windows are in-process. The final setup is the
+fcitx wiki's Wayland environment (no `GTK_IM_MODULE`/`QT_IM_MODULE`,
+`XMODIFIERS=@im=fcitx`) plus the Noctalia theme (`fcitx5-theme/`) for
+consistent styling. Keep the principles below as the historical design
+record; the patches under `niri-patch/`, `fcitx5-gtk-patch/`,
+`fcitx5-patch/` remain individually upstreamable.
+
 ## What this is
 
 A standalone Fcitx 5 Kimpanel-compatible candidate/preedit panel for Niri:

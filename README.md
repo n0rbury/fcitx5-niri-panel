@@ -1,5 +1,17 @@
 # fcitx5-niri-panel
 
+> **Status: pivoted (2026-09).** The standalone panel is retired from active
+> use. The final setup is stock fcitx5 with a custom theme
+> (`fcitx5-theme/Noctalia/`) and the fcitx wiki's Wayland environment
+> (no `GTK_IM_MODULE`/`QT_IM_MODULE`; `XMODIFIERS=@im=fcitx` for XWayland):
+> text-input-v3 apps get fcitx5's ClassicUI popup anchored by niri's
+> input-method-v2 support, XWayland/XIM apps get the themed xcb popup —
+> positioning correct by construction everywhere, no runtime patches
+> required. The panel source, the patches under `niri-patch/`,
+> `fcitx5-gtk-patch/` and `fcitx5-patch/`, and the coordinate-semantics
+> findings in `docs/` are kept as the record of why, and are individually
+> upstreamable.
+
 A standalone Fcitx 5 Kimpanel-compatible candidate/preedit panel for Niri.
 
 ## Current stage

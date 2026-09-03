@@ -1,0 +1,29 @@
+--- a/src/ui/kimpanel/kimpanel.cpp	2026-03-18 11:02:13.000000000 +0800
++++ b/src/ui/kimpanel/kimpanel.cpp	2026-09-03 17:36:43.025634992 +0800
+@@ -270,11 +270,21 @@
+         return;
+     }
+     if (component == UserInterfaceComponent::InputPanel) {
+-        if (classicui() && isKDE() &&
+-            (inputContext->frontendName().starts_with("wayland") ||
+-             (xcb() && inputContext->display().starts_with("x11:") &&
+-              xcb()->call<IXCBModule::isXWayland>(
+-                  inputContext->display().substr(4))))) {
++        // A wayland_v2 (text-input-v3) input context only exists where the
++        // compositor implements input-method-v2, and there the compositor
++        // anchors classicui's input popup to the client's cursor — strictly
++        // better positioning than relaying the rect through kimpanel, whose
++        // consumers anchor to the window content origin and cannot know an
++        // app's CSD margins. Delegate unconditionally for this frontend;
++        // classicui bails out gracefully if the popup surface is unavailable.
++        auto delegateToClassicUI =
++            inputContext->frontendName() == "wayland_v2" ||
++            (isKDE() &&
++             (inputContext->frontendName().starts_with("wayland") ||
++              (xcb() && inputContext->display().starts_with("x11:") &&
++               xcb()->call<IXCBModule::isXWayland>(
++                   inputContext->display().substr(4)))));
++        if (classicui() && delegateToClassicUI) {
+             proxy_->showAux(false);
+             proxy_->showPreedit(false);
+             proxy_->showLookupTable(false);
