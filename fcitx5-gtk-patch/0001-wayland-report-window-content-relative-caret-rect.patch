@@ -1,0 +1,25 @@
+--- a/gtk4/fcitximcontext.cpp	2026-03-17 23:20:38.000000000 +0800
++++ b/gtk4/fcitximcontext.cpp	2026-09-03 15:10:41.543029984 +0800
+@@ -886,6 +886,22 @@
+         surface = gdk_popup_get_parent(popup);
+     }
+ 
++    // (Wayland) The frame offset and popup positions above are relative to
++    // surfaces (buffer origins, CSD shadow margins included), so area is in
++    // toplevel-surface coordinates here. Kimpanel consumers anchor the rect
++    // to the window content origin (the compositor's tile/frame position),
++    // which does not include the shadow margin; convert to content
++    // coordinates. X11 keeps surface coordinates: the path below converts
++    // them to root coordinates.
++    if (fcitxcontext->is_wayland && surface) {
++        if (auto *root_native = gtk_native_get_for_surface(surface)) {
++            double rootX = 0, rootY = 0;
++            gtk_native_get_surface_transform(root_native, &rootX, &rootY);
++            area.x -= rootX;
++            area.y -= rootY;
++        }
++    }
++
+ #ifdef GDK_WINDOWING_X11
+     if (GDK_IS_X11_DISPLAY(display)) {
+         if (auto *native = gtk_widget_get_root(fcitxcontext->client_widget)) {
